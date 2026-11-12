@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0b0c1c">
+<title>Открытка</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23ff6f9c' d='M16 28S3 20 3 11a7 7 0 0 1 13-3 7 7 0 0 1 13 3c0 9-13 17-13 17z'/%3E%3C/svg%3E">
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0c1c; overflow: hidden; overscroll-behavior: none;
+    touch-action: none; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; color: #fff; }
+  #gc-canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  /* камера нужна только для распознавания, на экране её не видно */
+  #gc-cam { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
+  #gc-start { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px;
+    background: radial-gradient(120% 90% at 50% 20%, #1c1440 0%, #0b0c1c 70%); z-index: 5; }
+  #gc-start .box { max-width: 360px; text-align: center; }
+  #gc-start h1 { font-size: 30px; line-height: 1.15; margin: 0 0 14px; font-weight: 650; }
+  #gc-start p { font-size: 16px; line-height: 1.5; margin: 0 0 12px; color: #c9c8e6; }
+  #gc-start p.small { font-size: 13px; color: #8f8fb4; margin-top: 18px; }
+  button { font: inherit; color: inherit; border: 0; cursor: pointer; }
+  .primary { display: block; width: 100%; margin: 22px 0 10px; padding: 16px 18px; border-radius: 16px; font-size: 18px;
+    font-weight: 600; background: linear-gradient(135deg, #ff7aa5, #b98cff); color: #1a0f2e; }
+  .ghost { display: block; width: 100%; padding: 13px 18px; border-radius: 16px; font-size: 15px; background: transparent;
+    color: #c9c8e6; border: 1px solid #3a3763; }
+  button:disabled { opacity: .5; }
+  #gc-status { min-height: 22px; font-size: 14px; color: #ffcfa0; margin-top: 14px; }
+  #gc-skip, #gc-again { position: fixed; z-index: 4; display: none; background: rgba(255,255,255,.08); color: #cfcfee;
+    border: 1px solid rgba(255,255,255,.14); border-radius: 999px; }
+  #gc-skip { right: 12px; top: calc(12px + env(safe-area-inset-top)); padding: 8px 14px; font-size: 13px; }
+  #gc-again { left: 50%; transform: translateX(-50%); bottom: calc(34px + env(safe-area-inset-bottom)); padding: 13px 26px; font-size: 16px; }
+  #gc-debug { position: fixed; left: 8px; top: 8px; z-index: 6; font: 11px/1.35 monospace; color: #9f9; white-space: pre; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="gc-canvas"></canvas>
+<video id="gc-cam" playsinline muted autoplay></video>
+
+<div id="gc-start">
+  <div class="box">
+    <h1 id="gc-title"></h1>
+    <p id="gc-text"></p>
+    <button class="primary" id="gc-btn-cam">Начать с камерой</button>
+    <button class="ghost" id="gc-btn-ptr">Без камеры — пальцем по экрану</button>
+    <div id="gc-status"></div>
+    <p class="small">Видео с камеры обрабатывается прямо в браузере и никуда не отправляется.</p>
+  </div>
+</div>
+<button id="gc-skip">пропустить ›</button>
+<button id="gc-again">Ещё раз</button>
+<div id="gc-debug"></div>
+
+<script>
+(() => {
+'use strict';
+
+/* =====================================================================
+   НАСТРОЙКИ — всё, что захочешь поменять, лежит здесь
+   ===================================================================== */
+const CONFIG = {
+  startTitle: 'Открытка для тебя',
+  startText: 'Она управляется рукой. Держи телефон одной рукой, а вторую покажи фронтальной камере — целиком, в 30–50 см от экрана.',
+  letterTitle: 'Привет!',
+  letterText: 'Это письмо пряталось под туманом. Хорошо, что оно нашлось.',
+  words: ['тепло', 'улыбка', 'спасибо', 'радость', 'вместе', 'нежность'],
+  finalPhrase: 'Люблю тебя',
+
+  // Распознавание руки (MediaPipe). Менять не нужно, пока всё работает.
+  mediapipeVersion: '1.2.3',
+  modelUrl: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+};
+
+const QS = new URLSearchParams(location.search);
+const DEBUG = QS.has('debug');
+const MP_SOURCES = QS.get('mp') ? [QS.get('mp')] : [
+  'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@' + CONFIG.mediapipeVersion,
+  'https://unpkg.com/@mediapipe/tasks-vision@' + CONFIG.mediapipeVersion,
+];
+const MODEL_URL = QS.get('model') || CONFIG.modelUrl;
+const IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const PREFER_CPU = IS_IOS || QS.has('cpu');
+
+/* ---------- маленькие помощники ----------
+   id элементов начинаются с «gc-»: короткие id вроде «dbg» превращаются в глобальные переменные
+   и ломают библиотеку распознавания. */
+const $ = id => document.getElementById(id);
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, k) => a + (b - a) * k;
+const smooth = (a, b, t) => { const x = clamp((t - a) / (b - a)); return x * x * (3 - 2 * x); };
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = arr => arr[(Math.random() * arr.length) | 0];
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const FONT = 'Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+
+/* ---------- холст ---------- */
+const canvas = $('gc-canvas'), ctx = canvas.getContext('2d');
+const video = $('gc-cam');
+let W = 0, H = 0, U = 0, DPR = 1, bgGrad = null;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  U = Math.min(W, H * 0.62);                      // базовая единица размера
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+  bgGrad.addColorStop(0, '#090a1a'); bgGrad.addColorStop(1, '#1a0f30');
+}
+window.addEventListener('resize', resize); resize();
+
+const glowCache = {};
+function glowSprite(color) {
+  if (glowCache[color]) return glowCache[color];
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d'), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, color); gr.addColorStop(0.25, color); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.globalAlpha = 1; g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+  return (glowCache[color] = c);
+}
+function glow(x, y, r, color, alpha) {
+  if (alpha <= 0.01) return;
+  ctx.globalAlpha = Math.min(1, alpha);
+  ctx.drawImage(glowSprite(color), x - r, y - r, r * 2, r * 2);
+  ctx.globalAlpha = 1;
+}
+function text(str, x, y, size, color, alpha = 1, weight = 600, align = 'center') {
+  if (alpha <= 0.01) return;
+  ctx.globalAlpha = Math.min(1, alpha); ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.font = weight + ' ' + size + 'px ' + FONT; ctx.fillText(str, x, y); ctx.globalAlpha = 1;
+}
+function wrap(str, maxW, size, weight = 400) {
+  ctx.font = weight + ' ' + size + 'px ' + FONT;
+  const lines = []; let line = '';
+  for (const w of str.split(/\s+/)) {
+    const t = line ? line + ' ' + w : w;
+    if (ctx.measureText(t).width > maxW && line) { lines.push(line); line = w; } else line = t;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+function heartPath(cx, cy, s) {
+  ctx.beginPath();
+  for (let i = 0; i <= 64; i++) {
+    const t = -Math.PI + i / 64 * Math.PI * 2;
+    const x = 16 * Math.sin(t) ** 3, y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+    if (i) ctx.lineTo(cx + x * s, cy - y * s); else ctx.moveTo(cx + x * s, cy - y * s);
+  }
+  ctx.closePath();
+}
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+
+/* =====================================================================
+   ВВОД: рука с камеры или палец на экране
+   ===================================================================== */
+let mode = 'none';                      // 'camera' | 'pointer'
+const ptr = { down: false, x: 0, y: 0 };
+canvas.addEventListener('pointerdown', e => { ptr.down = true; ptr.x = e.clientX; ptr.y = e.clientY; try { canvas.setPointerCapture(e.pointerId); } catch (_) {} });
+canvas.addEventListener('pointermove', e => { ptr.x = e.clientX; ptr.y = e.clientY; });
+const ptrUp = () => { ptr.down = false; };
+canvas.addEventListener('pointerup', ptrUp); canvas.addEventListener('pointercancel', ptrUp);
+
+let landmarker = null, stream = null, lastVideoTime = -1, lastDetect = 0, detectErrors = 0, detectMs = 0;
+let makeLandmarker = null, delegate = '', detectCount = 0;
+const hand = { pts: null, others: [], seenAt: -1e9, palm: { x: 0, y: 0 }, pinchPt: { x: 0, y: 0 }, size: 1,
+               nExt: 0, pinchRatio: 1, pinch: false, fist: false, open: false, heart: false, deb: {} };
+
+const TIPS = [8, 12, 16, 20], PIPS = [6, 10, 14, 18];
+const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+const GAIN = 1.25;   // рука в центре кадра камеры достаёт до краёв экрана
+
+function mapPoint(p) {
+  const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
+  const s = Math.max(W / vw, H / vh), dw = vw * s, dh = vh * s;
+  let x = (W - dw) / 2 + (1 - p.x) * dw, y = (H - dh) / 2 + p.y * dh;   // 1 - x: зеркало, как в селфи
+  return { x: W / 2 + (x - W / 2) * GAIN, y: H / 2 + (y - H / 2) * GAIN };
+}
+function debounce(key, raw) {
+  const s = hand.deb[key] || (hand.deb[key] = { v: false, c: 0 });
+  if (raw === s.v) s.c = 0; else if (++s.c >= 2) { s.v = raw; s.c = 0; }
+  return s.v;
+}
+function handSize(p) { return dist(p[0], p[9]) || 1; }
+// сколько ждать, прежде чем считать, что рука пропала (на медленных телефонах кадры приходят реже)
+function seenWindow() { return Math.max(250, detectMs * 2.5 + 80); }
+
+function processHands(landmarks, now) {
+  if (!landmarks || !landmarks.length) { hand.others = []; if (now - hand.seenAt > 500) { hand.pts = null; hand.deb = {}; } return; }
+  const all = landmarks.map(lm => lm.map(mapPoint));
+  all.sort((a, b) => handSize(b) - handSize(a));            // главная рука — та, что ближе к камере
+  const raw = all[0];
+  if (hand.pts && now - hand.seenAt < seenWindow() + 100 && dist(hand.pts[9], raw[9]) < handSize(raw) * 2.5) {
+    for (let i = 0; i < 21; i++) { hand.pts[i].x += (raw[i].x - hand.pts[i].x) * 0.6; hand.pts[i].y += (raw[i].y - hand.pts[i].y) * 0.6; }
+  } else hand.pts = raw.map(p => ({ x: p.x, y: p.y }));
+  hand.others = all.slice(1);
+  hand.seenAt = now;
+
+  const p = hand.pts, size = handSize(p);
+  hand.size = size;
+  let n = 0;
+  for (let i = 0; i < 4; i++) if (dist(p[TIPS[i]], p[0]) > dist(p[PIPS[i]], p[0]) * 1.12) n++;
+  hand.nExt = n;
+  hand.pinchRatio = dist(p[4], p[8]) / size;
+  hand.palm = { x: (p[0].x + p[5].x + p[9].x + p[13].x + p[17].x) / 5, y: (p[0].y + p[5].y + p[9].y + p[13].y + p[17].y) / 5 };
+  hand.pinchPt = { x: (p[4].x + p[8].x) / 2, y: (p[4].y + p[8].y) / 2 };
+  hand.fist = debounce('fist', n === 0);
+  hand.open = debounce('open', n >= 3);
+  hand.pinch = debounce('pinch', hand.pinchRatio < (hand.pinch ? 0.55 : 0.36));
+  let heart = false;
+  if (hand.others.length) {                                  // сердце двумя руками — тоже считается
+    const q = hand.others[0], s2 = (size + handSize(q)) / 2;
+    heart = dist(p[8], q[8]) < s2 * 0.7 && dist(p[4], q[4]) < s2 * 0.7 && dist(p[0], q[0]) > s2 * 0.8;
+  }
+  hand.heart = debounce('heart', heart);
+}
+
+function detect(now) {
+  // между распознаваниями оставляем время на отрисовку, чтобы анимация не замирала
+  if (!landmarker || video.readyState < 2 || now - lastDetect < Math.max(33, detectMs * 1.6) || video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime; lastDetect = now;
+  try {
+    const t0 = performance.now();
+    const res = landmarker.detectForVideo(video, now);
+    detectMs = lerp(detectMs, performance.now() - t0, 0.2);
+    processHands(res.landmarks, now); detectErrors = 0;
+    if (delegate === 'GPU' && ++detectCount === 15 && detectMs > 140) switchToCpu();   // видеокарта не тянет — считаем на процессоре
+  } catch (e) {
+    if (++detectErrors > 30) { console.warn('hand tracking stopped', e); landmarker = null; mode = 'pointer'; }
+  }
+}
+
+function switchToCpu() {
+  const old = landmarker; landmarker = null;
+  makeLandmarker('CPU').then(lm => { landmarker = lm; delegate = 'CPU'; detectMs = 40; try { old.close(); } catch (_) {} })
+    .catch(() => { landmarker = old; delegate = 'CPU'; });
+}
+
+function readInput(now) {
+  if (ptr.down) return { present: true, x: ptr.x, y: ptr.y, px: ptr.x, py: ptr.y, grab: true, hold: true, open: false, src: 'ptr' };
+  if (mode === 'camera' && hand.pts && now - hand.seenAt < seenWindow())
+    return { present: true, x: hand.palm.x, y: hand.palm.y, px: hand.pinchPt.x, py: hand.pinchPt.y,
+             grab: hand.pinch || hand.fist, hold: hand.fist || hand.heart, open: hand.open, src: 'cam' };
+  return { present: false, x: 0, y: 0, px: 0, py: 0, grab: false, hold: false, open: false, src: 'none' };
+}
+
+function drawHands(now, inp) {
+  ctx.globalCompositeOperation = 'lighter';
+  if (mode === 'camera' && hand.pts && now - hand.seenAt < seenWindow() && !ptr.down) {
+    for (const pts of [hand.pts, ...hand.others]) {
+      ctx.strokeStyle = 'rgba(255,214,228,0.42)'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.beginPath();
+      for (const [a, b] of BONES) { ctx.moveTo(pts[a].x, pts[a].y); ctx.lineTo(pts[b].x, pts[b].y); }
+      ctx.stroke();
+      for (let i = 0; i < 21; i++) {
+        const tip = i % 4 === 0 && i > 0;
+        glow(pts[i].x, pts[i].y, tip ? 13 : 10, 'rgba(255,225,236,1)', 0.9);
+      }
+    }
+  }
+  if (ptr.down) glow(ptr.x, ptr.y, 34, 'rgba(255,205,225,1)', 0.75);
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+/* =====================================================================
+   СЦЕНЫ
+   ===================================================================== */
+let sceneIdx = -1, scene = null, sceneDone = false, advanceAt = 0, fade = 1, fadeDir = 0, pendingScene = -1;
+let particles = [];
+function finish(delayMs) { sceneDone = true; advanceAt = performance.now() + delayMs; }
+function spawn(x, y, n, opt = {}) {
+  for (let i = 0; i < n; i++) {
+    const a = opt.angle ? rand(opt.angle[0], opt.angle[1]) : rand(0, Math.PI * 2), v = rand(opt.v0 || 40, opt.v1 || 260);
+    particles.push({ x: x + rand(-1, 1) * (opt.spread || 0), y: y + rand(-1, 1) * (opt.spread || 0), vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+      age: 0, life: rand(opt.l0 || 0.8, opt.l1 || 1.8), r: rand(4, 9), col: pick(opt.cols || ['rgba(255,225,160,1)', 'rgba(255,190,215,1)', 'rgba(255,255,255,1)']), g: opt.g == null ? 60 : opt.g });
+  }
+}
+function updateParticles(dt) {
+  for (const p of particles) { p.age += dt; p.vx *= 1 - 1.6 * dt; p.vy = p.vy * (1 - 1.6 * dt) + p.g * dt; p.x += p.vx * dt; p.y += p.vy * dt; }
+  particles = particles.filter(p => p.age < p.life);
+}
+function drawParticles() {
+  ctx.globalCompositeOperation = 'lighter';
+  for (const p of particles) glow(p.x, p.y, p.r, p.col, 1 - p.age / p.life);
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+const scenes = [];
+
+/* ---------- 1. Взмах — звёзды ---------- */
+scenes.push({
+  enter() {
+    const cols = ['rgba(255,255,255,1)', 'rgba(255,236,200,1)', 'rgba(210,225,255,1)', 'rgba(255,210,228,1)'];
+    this.stars = Array.from({ length: 110 }, () => ({ fx: rand(0.04, 0.96), fy: rand(0.05, 0.84), r: pick([1, 1.2, 1.4, 1.8, 2.3]), ph: rand(0, 6.28), lit: -1, col: pick(cols) }));
+    this.lit = 0;
+  },
+  hint(m) { return this.lit < this.stars.length * 0.12 ? (m === 'camera' ? 'помаши рукой' : 'проведи пальцем по небу') : ''; },
+  update(dt, inp, now) {
+    if (inp.present) {
+      const R = U * 0.24;
+      for (const s of this.stars) if (s.lit < 0) {
+        const dx = s.fx * W - inp.x, dy = s.fy * H - inp.y;
+        if (dx * dx + dy * dy < R * R) { s.lit = now + Math.random() * 180; this.lit++; }
+      }
+    }
+    if (!sceneDone && this.lit >= this.stars.length * 0.6) {
+      for (const s of this.stars) if (s.lit < 0) s.lit = now + 200 + Math.random() * 900;
+      finish(3200);
+    }
+  },
+  draw(now) {
+    for (const s of this.stars) {
+      const x = s.fx * W, y = s.fy * H, dt = (now - s.lit) / 1000;
+      if (s.lit < 0 || dt < 0) { ctx.fillStyle = 'rgba(200,205,255,0.16)'; ctx.beginPath(); ctx.arc(x, y, s.r, 0, 7); ctx.fill(); continue; }
+      const b = Math.min(1, dt / 0.2) * (0.72 + 0.28 * Math.sin(now / 1000 * 3.2 + s.ph)), fl = Math.max(0, 1 - dt / 0.55);
+      ctx.globalCompositeOperation = 'lighter';
+      glow(x, y, s.r * (5 + 10 * fl), s.col, b * 0.9);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = 'rgba(255,255,255,' + b.toFixed(3) + ')'; ctx.beginPath(); ctx.arc(x, y, s.r * (1 + fl), 0, 7); ctx.fill();
+    }
+  },
+});
+
+/* ---------- 2. Ладонь — стереть туман ---------- */
+scenes.push({
+  enter() {
+    const FW = 128, FH = Math.max(64, Math.round(128 * H / W));
+    const f = document.createElement('canvas'); f.width = FW; f.height = FH;
+    const g = f.getContext('2d', { willReadFrequently: true });
+    g.fillStyle = '#5c6690'; g.fillRect(0, 0, FW, FH);
+    for (let i = 0; i < 70; i++) {                       // облачные пятна
+      const x = rand(0, FW), y = rand(0, FH), r = rand(10, 38), light = Math.random() < 0.55;
+      const gr = g.createRadialGradient(x, y, 0, x, y, r);
+      gr.addColorStop(0, light ? 'rgba(170,180,215,0.22)' : 'rgba(50,56,90,0.22)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = gr; g.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    this.fog = f; this.fg = g; this.fogAlpha = 1; this.clearing = false; this.cleared = 0; this.frame = 0; this.prev = null;
+  },
+  card() {
+    const cw = Math.min(W * 0.86, U * 0.92), ts = U * 0.105, bs = Math.max(15, U * 0.05), pad = U * 0.07;
+    const lines = wrap(CONFIG.letterText, cw - pad * 2, bs, 400);
+    const ch = pad * 2 + ts * 1.25 + lines.length * bs * 1.5 + U * 0.16;
+    return { x: (W - cw) / 2, y: H * 0.44 - ch / 2, w: cw, h: ch, ts, bs, pad, lines };
+  },
+  hint(m) { return !this.clearing && this.cleared < 0.12 ? (m === 'camera' ? 'сотри туман ладонью' : 'сотри туман пальцем') : ''; },
+  wipe(x, y) {
+    const g = this.fg, kx = this.fog.width / W, ky = this.fog.height / H, r = U * 0.2 * kx;
+    const gr = g.createRadialGradient(x * kx, y * ky, 0, x * kx, y * ky, r);
+    gr.addColorStop(0, 'rgba(0,0,0,0.55)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+    g.globalCompositeOperation = 'destination-out'; g.fillStyle = gr; g.beginPath(); g.arc(x * kx, y * ky, r, 0, 7); g.fill();
+    g.globalCompositeOperation = 'source-over';
+  },
+  update(dt, inp) {
+    if (inp.present && !this.clearing) {
+      const a = this.prev || inp, n = Math.max(1, Math.min(12, Math.round(Math.hypot(inp.x - a.x, inp.y - a.y) / (U * 0.06))));
+      for (let i = 1; i <= n; i++) this.wipe(lerp(a.x, inp.x, i / n), lerp(a.y, inp.y, i / n));
+      this.prev = { x: inp.x, y: inp.y };
+    } else this.prev = null;
+    if (!this.clearing && ++this.frame % 10 === 0) {
+      const c = this.card(), kx = this.fog.width / W, ky = this.fog.height / H;
+      const d = this.fg.getImageData(Math.floor(c.x * kx), Math.floor(c.y * ky), Math.max(1, Math.floor(c.w * kx)), Math.max(1, Math.floor(c.h * ky))).data;
+      let sum = 0; for (let i = 3; i < d.length; i += 4) sum += d[i];
+      this.cleared = 1 - sum / (d.length / 4) / 255;
+      if (this.cleared > 0.6) this.clearing = true;       // стёр больше половины — остальное уходит само
+    }
+    if (this.clearing) {
+      this.fogAlpha = Math.max(0, this.fogAlpha - dt / 0.9);
+      if (this.fogAlpha === 0 && !sceneDone) finish(6000);
+    }
+  },
+  draw(now) {
+    const c = this.card();
+    ctx.fillStyle = 'rgba(44,34,78,0.94)'; roundRect(c.x, c.y, c.w, c.h, 14); ctx.fill();
+    ctx.save(); ctx.shadowColor = 'rgba(200,140,255,0.8)'; ctx.shadowBlur = 16; ctx.strokeStyle = 'rgba(205,150,230,0.9)'; ctx.lineWidth = 1.5;
+    roundRect(c.x, c.y, c.w, c.h, 14); ctx.stroke(); ctx.restore();
+    let y = c.y + c.pad + c.ts * 0.6;
+    text(CONFIG.letterTitle, W / 2, y, c.ts, '#fff', 1, 650);
+    y += c.ts * 0.65 + c.bs * 0.9;
+    for (const l of c.lines) { text(l, W / 2, y, c.bs, '#e1d7f0', 1, 400); y += c.bs * 1.5; }
+    ctx.fillStyle = '#ff6f9c'; heartPath(W / 2, y + U * 0.045, U * 0.0042 * (1 + 0.06 * Math.sin(now / 400))); ctx.fill();
+    if (this.fogAlpha > 0) { ctx.globalAlpha = 0.985 * this.fogAlpha; ctx.drawImage(this.fog, 0, 0, W, H); ctx.globalAlpha = 1; }
+  },
+});
+
+/* ---------- 3. Щепоть — открыть конверт ---------- */
+scenes.push({
+  enter() { this.open = 0; this.grabbing = false; this.openedAt = -1; this.sparkAcc = 0; },
+  geo() {
+    const ew = U * 0.64, eh = ew * 0.64, cx = W / 2, cy = H * 0.58;
+    const x0 = cx - ew / 2, x1 = cx + ew / 2, y0 = cy - eh / 2, y1 = cy + eh / 2;
+    return { ew, eh, cx, x0, x1, y0, y1, apexY: lerp(y0 + eh * 0.54, y0 - eh * 0.5, this.open), notchY: y0 + eh * 0.48 };
+  },
+  hint(m) {
+    if (this.openedAt >= 0) return '';
+    if (this.grabbing) return 'тяни вверх';
+    return m === 'camera' ? 'возьми конверт щепотью и потяни вверх' : 'потяни клапан конверта вверх';
+  },
+  update(dt, inp, now) {
+    const g = this.geo();
+    this.near = inp.present && Math.hypot(inp.px - g.cx, inp.py - g.apexY) < U * 0.3;
+    if (this.openedAt < 0) {
+      if (inp.present && inp.grab) {
+        if (!this.grabbing && (this.near || this.open > 0.05)) { this.grabbing = true; this.startY = inp.py; this.startOpen = this.open; }
+        if (this.grabbing) this.open = Math.max(this.open, clamp(this.startOpen + (this.startY - inp.py) / (H * 0.2)));
+      } else this.grabbing = false;
+      if (this.open >= 1) { this.openedAt = now; this.grabbing = false; finish(7000); spawn(g.cx, g.y0, 40, { angle: [-2.7, -0.45], v0: 120, v1: 420, l0: 0.9, l1: 1.7 }); }
+    } else {
+      this.sparkAcc += dt;
+      if (now - this.openedAt < 2600 && this.sparkAcc > 0.06) { this.sparkAcc = 0; spawn(g.cx, g.y0, 2, { angle: [-2.6, -0.55], v0: 100, v1: 380, l0: 0.9, l1: 1.7, spread: 8 }); }
+    }
+    this.pin = inp.present && (this.grabbing || this.near) ? { x: inp.px, y: inp.py } : null;
+  },
+  draw(now) {
+    const g = this.geo(), t = this.openedAt < 0 ? 0 : (now - this.openedAt) / 1000, rise = smooth(0, 1.2, t);
+    const edge = '#ffc8d7';
+    const flap = () => {
+      ctx.fillStyle = g.apexY > g.y0 ? '#a85c78' : '#96506c';
+      ctx.beginPath(); ctx.moveTo(g.x0, g.y0); ctx.lineTo(g.x1, g.y0); ctx.lineTo(g.cx, g.apexY); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = edge; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.beginPath(); ctx.moveTo(g.x0, g.y0); ctx.lineTo(g.cx, g.apexY); ctx.lineTo(g.x1, g.y0); ctx.stroke();
+    };
+    ctx.fillStyle = '#783e5c'; ctx.fillRect(g.x0, g.y0, g.ew, g.eh);
+    if (g.apexY <= g.y0) flap();
+    if (rise > 0) {                                           // письмо выезжает из конверта
+      const lw = g.ew * 0.84, lh = g.eh * 0.95, ly = lerp(g.y0 + g.eh * 0.1, g.y0 - g.eh * 0.72, rise);
+      ctx.fillStyle = '#faf0e4'; ctx.fillRect(g.cx - lw / 2, ly, lw, Math.min(lh, g.y1 - ly - 2));
+      ctx.fillStyle = '#cdb9b9';
+      for (let i = 0; i < 4; i++) ctx.fillRect(g.cx - lw * 0.4, ly + lh * (0.16 + i * 0.13), lw * [0.66, 0.78, 0.56, 0.72][i], Math.max(2, lh * 0.035));
+    }
+    ctx.fillStyle = '#c4768e'; ctx.beginPath(); ctx.moveTo(g.x0, g.y0); ctx.lineTo(g.cx, g.notchY); ctx.lineTo(g.x1, g.y0); ctx.lineTo(g.x1, g.y1); ctx.lineTo(g.x0, g.y1); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,200,215,0.75)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(g.x0, g.y0); ctx.lineTo(g.cx, g.notchY); ctx.lineTo(g.x1, g.y0); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,200,215,0.35)'; ctx.lineWidth = 1; ctx.beginPath();
+    ctx.moveTo(g.x0, g.y1); ctx.lineTo(g.cx - g.ew * 0.14, g.y0 + g.eh * 0.32); ctx.moveTo(g.x1, g.y1); ctx.lineTo(g.cx + g.ew * 0.14, g.y0 + g.eh * 0.32); ctx.stroke();
+    ctx.strokeStyle = edge; ctx.lineWidth = 2; ctx.strokeRect(g.x0, g.y0, g.ew, g.eh);
+    if (g.apexY > g.y0) flap();
+    if (this.openedAt < 0) {                                  // подсветка: за что браться
+      const pulse = 0.5 + 0.5 * Math.sin(now / 260), a = this.grabbing ? 1 : this.near ? 0.9 : 0.45;
+      ctx.strokeStyle = 'rgba(255,215,140,' + a + ')'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(g.cx, g.apexY, U * 0.035 + pulse * U * 0.012, 0, 7); ctx.stroke();
+      if (this.pin && this.grabbing) { ctx.globalCompositeOperation = 'lighter'; glow(this.pin.x, this.pin.y, U * 0.07, 'rgba(255,215,140,1)', 0.8); ctx.globalCompositeOperation = 'source-over'; }
+    }
+    if (this.openedAt >= 0) {                                 // слова вылетают
+      const pos = [[0.26, 0.27], [0.74, 0.27], [0.5, 0.21], [0.27, 0.14], [0.73, 0.14], [0.5, 0.08]];
+      const cols = ['#ffbed2', '#ffe1a0', '#c8d7ff', '#ffc8e1', '#ffebbe', '#d7c8ff'];
+      const size = Math.max(18, U * 0.068);
+      CONFIG.words.slice(0, 6).forEach((w, i) => {
+        const k = smooth(0.7 + i * 0.38, 1.9 + i * 0.38, t); if (k <= 0) return;
+        text(w, lerp(g.cx, pos[i][0] * W, k), lerp(g.y0 - g.eh * 0.2, pos[i][1] * H, k) + 5 * Math.sin(now / 620 + i), size, cols[i], k, 650);
+      });
+    }
+  },
+});
+
+/* ---------- 4. Кулак — наполнить сердце ---------- */
+scenes.push({
+  enter() { this.p = 0; this.fullAt = -1; this.burstAt = -1; this.hearts = []; this.heartAcc = 0; this.holding = false; },
+  hint(m) {
+    if (this.burstAt >= 0) return '';
+    if (this.fullAt >= 0) return m === 'camera' ? 'а теперь раскрой ладонь' : 'отпусти';
+    if (this.holding) return 'держи…';
+    return m === 'camera' ? 'сожми кулак и держи' : 'нажми и держи';
+  },
+  update(dt, inp, now) {
+    this.holding = inp.present && inp.hold;
+    const cy = H * 0.42;
+    if (this.burstAt < 0) {
+      if (this.fullAt < 0) {
+        this.p = clamp(this.p + (this.holding ? dt / 2.2 : -dt * 0.25));
+        if (this.p >= 1) this.fullAt = now;
+      } else if ((now - this.fullAt > 450 && !this.holding) || now - this.fullAt > 3000) {
+        this.burstAt = now; finish(1e12);
+        spawn(W / 2, cy, 150, { v0: 60, v1: U * 1.5, l0: 1.1, l1: 2.4, spread: U * 0.12, g: 40, cols: ['rgba(255,95,140,1)', 'rgba(255,150,180,1)', 'rgba(255,215,150,1)', 'rgba(255,255,255,1)'] });
+        setTimeout(() => { if (scene === this) $('gc-again').style.display = 'block'; }, 4500);
+      }
+    } else {
+      this.heartAcc += dt;
+      if (this.heartAcc > 0.4 && this.hearts.length < 22) { this.heartAcc = 0; this.hearts.push({ x: rand(0.08, 0.92) * W, y: H + 20, v: rand(35, 70), s: rand(0.5, 1.1), ph: rand(0, 6.28), col: pick(['#ff5f8c', '#ff96b9', '#ffc8d7']) }); }
+      for (const h of this.hearts) h.y -= h.v * dt;
+      this.hearts = this.hearts.filter(h => h.y > -30);
+    }
+  },
+  draw(now) {
+    const cx = W / 2, cy = H * 0.42;
+    if (this.burstAt < 0) {
+      const s = U * 0.0135 * (1 + 0.035 * Math.sin(now / 150) * (this.holding || this.fullAt >= 0 ? 1 : 0.3));
+      const top = cy - 12.2 * s, bot = cy + 17 * s;
+      if (this.p > 0) {
+        ctx.save(); heartPath(cx, cy, s); ctx.clip();
+        const gr = ctx.createLinearGradient(0, top, 0, bot); gr.addColorStop(0, '#ff7aa8'); gr.addColorStop(1, '#e83e78');
+        ctx.fillStyle = gr; ctx.fillRect(cx - 17 * s, lerp(bot, top, this.p), 34 * s, bot - top + 2); ctx.restore();
+      }
+      ctx.save(); ctx.shadowColor = 'rgba(255,110,160,0.95)'; ctx.shadowBlur = 14 + 16 * this.p; ctx.strokeStyle = '#ff9fbe'; ctx.lineWidth = 2.5; ctx.lineJoin = 'round';
+      heartPath(cx, cy, s); ctx.stroke(); ctx.restore();
+      if (this.p > 0.01 && this.fullAt < 0) text(Math.round(this.p * 100) + '%', cx, bot + U * 0.08, Math.max(15, U * 0.05), '#ffc8d7', 0.9, 500);
+    } else {
+      const t = (now - this.burstAt) / 1000, a = smooth(0.3, 1.2, t);
+      for (const h of this.hearts) {
+        ctx.globalAlpha = clamp((h.y - H * 0.08) / (H * 0.25)) * 0.85; ctx.fillStyle = h.col;
+        heartPath(h.x + 14 * Math.sin(now / 700 + h.ph), h.y, U * 0.0028 * h.s); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      let size = U * 0.17; ctx.font = '650 ' + size + 'px ' + FONT;
+      const tw = ctx.measureText(CONFIG.finalPhrase).width; if (tw > W * 0.86) size *= W * 0.86 / tw;
+      ctx.save(); ctx.shadowColor = 'rgba(255,110,155,0.95)'; ctx.shadowBlur = 26;
+      text(CONFIG.finalPhrase, cx, cy + 10 * (1 - a), size, '#fff', a, 650); ctx.restore();
+    }
+  },
+});
+
+/* =====================================================================
+   ГЛАВНЫЙ ЦИКЛ
+   ===================================================================== */
+function setScene(i) {
+  sceneIdx = i; scene = scenes[i]; sceneDone = false; advanceAt = 0; particles = [];
+  $('gc-again').style.display = 'none'; $('gc-skip').style.display = i < scenes.length - 1 ? 'block' : 'none';
+  scene.enter();
+}
+function goTo(i) { if (fadeDir === 1) return; pendingScene = i; fadeDir = 1; }
+$('gc-skip').onclick = () => { if (sceneIdx < scenes.length - 1) goTo(sceneIdx + 1); };
+$('gc-again').onclick = () => goTo(0);
+
+let hintText = '', hintShown = '', hintAlpha = 0, lastT = 0, running = false, fps = 60;
+function frame(now) {
+  if (!running) return;
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (now - lastT) / 1000 || 0.016); lastT = now; fps = lerp(fps, 1 / dt, 0.05);
+  if (mode === 'camera') detect(now);
+  const inp = readInput(now);
+
+  if (fadeDir === 1) { fade = Math.min(1, fade + dt / 0.45); if (fade === 1) { setScene(pendingScene); fadeDir = -1; } }
+  else if (fadeDir === -1) { fade = Math.max(0, fade - dt / 0.55); if (fade === 0) fadeDir = 0; }
+  else { scene.update(dt, inp, now); if (sceneDone && now > advanceAt && sceneIdx < scenes.length - 1) goTo(sceneIdx + 1); }
+  updateParticles(dt);
+
+  ctx.fillStyle = bgGrad; ctx.fillRect(0, 0, W, H);
+  if (DEBUG && mode === 'camera' && video.videoWidth) {       // ?debug — видно, что видит камера
+    const vw = video.videoWidth, vh = video.videoHeight, s = Math.max(W / vw, H / vh) * GAIN;
+    ctx.save(); ctx.globalAlpha = 0.4; ctx.translate(W / 2, H / 2); ctx.scale(-s, s); ctx.drawImage(video, -vw / 2, -vh / 2); ctx.restore();
+  }
+  scene.draw(now);
+  drawParticles();
+  drawHands(now, inp);
+
+  hintText = fadeDir === 0 ? scene.hint(mode) : '';
+  if (hintText === hintShown) hintAlpha = Math.min(1, hintAlpha + dt / 0.35);
+  else { hintAlpha -= dt / 0.25; if (hintAlpha <= 0) { hintAlpha = 0; hintShown = hintText; } }
+  if (hintShown) {
+    const hs = Math.max(16, Math.min(24, U * 0.052)), lines = wrap(hintShown, W * 0.84, hs, 500);
+    lines.forEach((l, i) => text(l, W / 2, Math.max(62, H * 0.115) + i * hs * 1.35 - (lines.length - 1) * hs * 0.6, hs, '#d2d2f0', hintAlpha * (0.8 + 0.2 * Math.sin(now / 420)), 500));
+  }
+  if (mode === 'camera' && !ptr.down && now - hand.seenAt > 2500 && !sceneDone && fadeDir === 0)
+    text('покажи руку камере целиком · или води пальцем', W / 2, H - 34, Math.max(12, U * 0.034), '#8f8fb4', 0.9, 400);
+
+  if (fade > 0) { ctx.fillStyle = 'rgba(8,8,20,' + fade + ')'; ctx.fillRect(0, 0, W, H); }
+  if (DEBUG) $('gc-debug').textContent = `fps ${fps.toFixed(0)}  det ${detectMs.toFixed(0)}ms ${delegate}  mode ${mode}  src ${inp.src}\n` +
+    `ext ${hand.nExt} pinch ${hand.pinchRatio.toFixed(2)} ${hand.pinch ? 'PINCH ' : ''}${hand.fist ? 'FIST ' : ''}${hand.open ? 'OPEN ' : ''}${hand.heart ? 'HEART' : ''}\nscene ${sceneIdx + 1} done ${sceneDone}`;
+}
+
+/* =====================================================================
+   ЗАПУСК
+   ===================================================================== */
+const setStatus = s => { $('gc-status').textContent = s; };
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('no camera api');
+  stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+  video.srcObject = stream;
+  await video.play();
+}
+async function loadTracker() {
+  let lastErr;
+  for (const base of MP_SOURCES) {
+    try {
+      const vision = await import(base + '/vision_bundle.mjs');
+      const files = await vision.FilesetResolver.forVisionTasks(base + '/wasm');
+      makeLandmarker = d => vision.HandLandmarker.createFromOptions(files, {
+        baseOptions: { modelAssetPath: MODEL_URL, delegate: d }, runningMode: 'VIDEO', numHands: 2,
+      });
+      if (!PREFER_CPU) { try { const lm = await makeLandmarker('GPU'); delegate = 'GPU'; return lm; } catch (e) { console.warn('GPU delegate failed, using CPU', e); } }
+      const lm = await makeLandmarker('CPU'); delegate = 'CPU'; return lm;
+    } catch (e) { lastErr = e; console.warn('tracker source failed:', base, e); }
+  }
+  throw lastErr || new Error('no tracker');
+}
+function begin(m) {
+  mode = m; $('gc-start').style.display = 'none';
+  if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(() => {});   // чтобы экран не гас, пока машешь рукой
+  fade = 1; fadeDir = -1; setScene(0);
+  running = true; lastT = performance.now(); requestAnimationFrame(frame);
+}
+function fallback(msg) {
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  setStatus(msg); setTimeout(() => begin('pointer'), 2200);
+}
+$('gc-title').textContent = CONFIG.startTitle; $('gc-text').textContent = CONFIG.startText; document.title = CONFIG.startTitle;
+$('gc-btn-cam').onclick = async () => {
+  $('gc-btn-cam').disabled = $('gc-btn-ptr').disabled = true;
+  setStatus('Запрашиваю доступ к камере…');
+  try { await startCamera(); } catch (e) { console.warn(e); return fallback('Камера недоступна — запускаю управление пальцем.'); }
+  setStatus('Загружаю распознавание руки… это несколько секунд.');
+  try { landmarker = await withTimeout(loadTracker(), 40000); } catch (e) { console.warn(e); return fallback('Распознавание руки не загрузилось — запускаю управление пальцем.'); }
+  setStatus(''); begin('camera');
+};
+$('gc-btn-ptr').onclick = () => begin('pointer');
+
+// для отладки и автотестов
+window.__card = { get state() { return { mode, sceneIdx, sceneDone, fade, hand: { seen: performance.now() - hand.seenAt < seenWindow(), nExt: hand.nExt, pinch: hand.pinch, fist: hand.fist, open: hand.open, pinchRatio: hand.pinchRatio, palm: hand.palm }, scene: scene && { lit: scene.lit, cleared: scene.cleared, open: scene.open, p: scene.p, burstAt: scene.burstAt, openedAt: scene.openedAt } }; } };
+})();
+</script>
+</body>
+</html>
