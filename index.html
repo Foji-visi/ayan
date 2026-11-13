@@ -60,10 +60,10 @@
    ===================================================================== */
 const CONFIG = {
   startTitle: 'Открытка для тебя',
-  startText: 'Она управляется рукой. Держи телефон одной рукой, а вторую покажи фронтальной камере — целиком, в 30–50 см от экрана.',
+  startText: 'Она управляется руками. Поставь телефон так, чтобы фронтальная камера видела твои руки, в 30–50 см от экрана. В конце понадобятся обе руки.',
   letterTitle: 'Сайн байна!',
   letterText: 'Месяц назад у тебя был день рождения. Поздравление немного задержалось в тумане, но всё-таки добралось.',
-  words: ['һайхан|красивая', 'сэбэрхэн|хорошенькая', 'хөөрхэн|миленькая', 'наран|солнце', 'сэсэг|имба роум', 'жаргал|счастье'],   // до шести слов; перевод под словом — через | : 'наран|солнце'
+  words: ['һайхан', 'сэбэрхэн', 'хөөрхэн', 'наран', 'ИМБА РОУМ', 'жаргал'],   // до шести слов; перевод под словом — через | : 'наран|солнце'
   finalPhrase: 'Түрэһэн үдэрөөр\nамаршалнаб!',   // «Поздравляю с днём рождения!»; перенос строки — через \n
   finalSub: '',                     // маленькая строка под главной фразой (можно оставить пустой)
   shape: 'heart',                   // фигура в финале: 'heart' — сердце, 'star' — звезда
@@ -191,8 +191,12 @@ let landmarker = null, stream = null, lastVideoTime = -1, lastDetect = 0, detect
 let makeLandmarker = null, delegate = '', detectCount = 0;
 let worker = null, workerBusy = false, workerSentAt = 0, bitmapErrors = 0, numHandsWanted = 1, workerFrames = 0;
 // target — последние точки от распознавания, pts — то, что рисуется (плавно догоняет target каждый кадр)
-const hand = { target: null, pts: null, others: [], seenAt: -1e9, palm: { x: 0, y: 0 }, pinchPt: { x: 0, y: 0 },
-               nExt: 0, pinchRatio: 1, pinch: false, fist: false, open: false, heart: false, deb: {} };
+// Распознавание приходит 10–20 раз в секунду. Чтобы рука не прыгала, между двумя распознаваниями
+// точки плавно едут от старого положения к новому за время, равное промежутку между ними.
+const hand = { target: null, pts: null, from: null, t0: 0, dur: 80, lastAt: 0,
+               others: [], oPts: null, oFrom: null, oTo: null, seenAt: -1e9, palm: { x: 0, y: 0 }, pinchPt: { x: 0, y: 0 },
+               nExt: 0, pinchRatio: 1, pinch: false, fist: false, open: false, heart: false, heartUntil: 0, deb: {} };
+let numHandsCur = 1, handsSwitching = false;
 
 const TIPS = [8, 12, 16, 20], PIPS = [6, 10, 14, 18];
 const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
@@ -215,17 +219,29 @@ function seenWindow() { return Math.max(280, detectMs * 2.5 + 120); }
 // пауза между распознаваниями: чем ниже качество, тем реже — остальное время уходит на анимацию
 function detectGap() { return worker ? [40, 55, 80][quality] : Math.max([50, 66, 90][quality], detectMs * 1.6); }
 
+const copyPts = a => a.map(q => ({ x: q.x, y: q.y }));
 function processHands(landmarks, now) {
   if (!landmarks || !landmarks.length) {
-    hand.others = [];
+    hand.others = []; hand.oPts = null;
     if (now - hand.seenAt > 500) { hand.target = null; hand.pts = null; hand.deb = {}; }
     return;
   }
   const all = landmarks.map(lm => lm.map(mapPoint));
   if (all.length > 1) all.sort((a, b) => handSize(b) - handSize(a));    // главная рука — та, что ближе к камере
-  const p = all[0], size = handSize(p);
-  if (hand.target && dist(hand.target[9], p[9]) > size * 3) hand.pts = null;   // рука «перепрыгнула» — не тянем её через весь экран
-  hand.target = p; hand.others = all.slice(1); hand.seenAt = now;
+  let p = all[0], size = handSize(p), o = all[1] || null;
+  // если руки поменялись местами по размеру — оставляем главной ту, что была ближе к прошлому положению
+  if (o && hand.target && dist(o[0], hand.target[0]) < dist(p[0], hand.target[0]) * 0.6) { const t = p; p = o; o = t; size = handSize(p); }
+  const gap = now - hand.lastAt; hand.lastAt = now;
+  if (gap < 400) hand.dur = lerp(hand.dur, clamp(gap * 1.2, 35, 260), 0.35);   // чуть дольше промежутка — рука не замирает в ожидании
+  // рука «перепрыгнула» или только появилась — ставим сразу, без проезда через весь экран
+  hand.from = hand.pts && hand.target && dist(hand.target[9], p[9]) < size * 3 ? copyPts(hand.pts) : copyPts(p);
+  if (!hand.pts) hand.pts = copyPts(p);
+  if (o) {
+    hand.oFrom = hand.oPts && hand.oTo && dist(hand.oTo[9], o[9]) < handSize(o) * 3 ? copyPts(hand.oPts) : copyPts(o);
+    if (!hand.oPts) hand.oPts = copyPts(o);
+    hand.oTo = o;
+  } else { hand.oPts = null; hand.oTo = null; }
+  hand.target = p; hand.t0 = now; hand.others = all.slice(1); hand.seenAt = now;
 
   let n = 0;
   for (let i = 0; i < 4; i++) if (dist(p[TIPS[i]], p[0]) > dist(p[PIPS[i]], p[0]) * 1.12) n++;
@@ -234,24 +250,29 @@ function processHands(landmarks, now) {
   hand.fist = debounce('fist', n === 0);
   hand.open = debounce('open', n >= 3);
   hand.pinch = debounce('pinch', hand.pinchRatio < (hand.pinch ? 0.55 : 0.36));
-  let heart = false;
-  if (hand.others.length) {                                  // сердце двумя руками — тоже считается
-    const q = hand.others[0], s2 = (size + handSize(q)) / 2;
-    heart = dist(p[8], q[8]) < s2 * 0.7 && dist(p[4], q[4]) < s2 * 0.7 && dist(p[0], q[0]) > s2 * 0.8;
+  // сердце двумя руками: кончики указательных сходятся сверху, кончики больших — снизу, запястья врозь
+  if (o) {
+    const s2 = (size + handSize(o)) / 2;
+    if (dist(p[8], o[8]) < s2 * 0.8 && dist(p[4], o[4]) < s2 * 0.8 && dist(p[0], o[0]) > s2 * 0.7) hand.heartUntil = now + 450;
   }
-  hand.heart = debounce('heart', heart);
+  hand.heart = now < hand.heartUntil;           // руки часто на миг теряются, когда пальцы соприкасаются, — прощаем
 }
-function smoothHand(dt) {
-  const t = hand.target; if (!t) return;
-  if (!hand.pts) hand.pts = t.map(p => ({ x: p.x, y: p.y }));
-  const k = 1 - Math.exp(-dt * 22), p = hand.pts;
-  for (let i = 0; i < 21; i++) { p[i].x += (t[i].x - p[i].x) * k; p[i].y += (t[i].y - p[i].y) * k; }
+function interp(out, from, to, k) {
+  for (let i = 0; i < 21; i++) { out[i].x = from[i].x + (to[i].x - from[i].x) * k; out[i].y = from[i].y + (to[i].y - from[i].y) * k; }
+}
+function smoothHand(now) {
+  const t = hand.target; if (!t || !hand.pts) return;
+  const k = clamp((now - hand.t0) / hand.dur);
+  interp(hand.pts, hand.from, t, k);
+  if (hand.oPts && hand.oTo) interp(hand.oPts, hand.oFrom, hand.oTo, k);
+  const p = hand.pts;
   hand.palm.x = (p[0].x + p[5].x + p[9].x + p[13].x + p[17].x) / 5; hand.palm.y = (p[0].y + p[5].y + p[9].y + p[13].y + p[17].y) / 5;
   hand.pinchPt.x = (p[4].x + p[8].x) / 2; hand.pinchPt.y = (p[4].y + p[8].y) / 2;
 }
 
 /* --- распознавание в основном потоке --- */
 function detectMain(now) {
+  if (handsSwitching) return;
   if (video.readyState < 2 || now - lastDetect < detectGap() || video.currentTime === lastVideoTime) return;
   lastVideoTime = video.currentTime; lastDetect = now;
   try {
@@ -275,8 +296,9 @@ async function loadTracker(numHands) {
     try {
       const vision = await import(base + '/vision_bundle.mjs');
       const files = await vision.FilesetResolver.forVisionTasks(base + '/wasm');
+      numHandsCur = numHands;
       makeLandmarker = d => vision.HandLandmarker.createFromOptions(files, {
-        baseOptions: { modelAssetPath: MODEL_URL, delegate: d }, runningMode: 'VIDEO', numHands,
+        baseOptions: { modelAssetPath: MODEL_URL, delegate: d }, runningMode: 'VIDEO', numHands: numHandsCur,
       });
       if (!PREFER_CPU) { try { const lm = await makeLandmarker('GPU'); delegate = 'GPU'; return lm; } catch (e) { console.warn('GPU delegate failed, using CPU', e); } }
       const lm = await makeLandmarker('CPU'); delegate = 'CPU'; return lm;
@@ -287,7 +309,7 @@ async function loadTracker(numHands) {
 
 /* --- распознавание в отдельном потоке (worker) --- */
 const WORKER_SRC = [
-  "let lm = null, make = null, delegate = '', n = 0, ems = 0, switching = false;",
+  "let lm = null, make = null, delegate = '', n = 0, ems = 0, switching = false, nh = 1;",
   "self.onmessage = async e => {",
   "  const m = e.data;",
   "  if (m.type === 'init') {",
@@ -296,13 +318,18 @@ const WORKER_SRC = [
   "      try {",
   "        const vision = await import(base + '/vision_bundle.mjs');",
   "        const files = await vision.FilesetResolver.forVisionTasks(base + '/wasm');",
-  "        make = d => vision.HandLandmarker.createFromOptions(files, { baseOptions: { modelAssetPath: m.model, delegate: d }, runningMode: 'VIDEO', numHands: m.numHands });",
+  "        nh = m.numHands;",
+  "        make = d => vision.HandLandmarker.createFromOptions(files, { baseOptions: { modelAssetPath: m.model, delegate: d }, runningMode: 'VIDEO', numHands: nh });",
   "        if (!m.preferCpu) { try { lm = await make('GPU'); delegate = 'GPU'; } catch (err) { lm = null; } }",
   "        if (!lm) { lm = await make('CPU'); delegate = 'CPU'; }",
   "        self.postMessage({ type: 'ready', delegate }); return;",
   "      } catch (err) { lastErr = err; }",
   "    }",
   "    self.postMessage({ type: 'fail', error: String(lastErr) });",
+  "  } else if (m.type === 'hands') {",
+  "    nh = m.n; switching = true;",
+  "    try { if (lm) await lm.setOptions({ numHands: nh }); } catch (err) {}",
+  "    switching = false; self.postMessage({ type: 'handsDone', n: nh });",
   "  } else if (m.type === 'frame') {",
   "    let res = null, ok = true; const t0 = performance.now();",
   "    try { if (lm && !switching) res = lm.detectForVideo(m.bitmap, m.ts).landmarks; } catch (err) { ok = false; }",
@@ -327,12 +354,14 @@ function startWorker(numHands) {
       const m = e.data;
       if (m.type === 'ready') { clearTimeout(to); worker = w; delegate = m.delegate + '·W'; resolve(); }
       else if (m.type === 'fail') { clearTimeout(to); w.terminate(); reject(new Error(m.error)); }
+      else if (m.type === 'handsDone') { numHandsCur = m.n; handsSwitching = false; }
       else if (m.type === 'result') {
         workerBusy = false; workerFrames++; detectMs = lerp(detectMs, m.ms, 0.2); delegate = m.delegate + '·W';
         if (m.ok) { detectErrors = 0; processHands(m.landmarks, performance.now()); } else if (++detectErrors > 30) workerFailed('detect errors');
       }
     };
     w.onerror = e => { clearTimeout(to); if (worker === w) workerFailed('worker error'); else { w.terminate(); reject(new Error('worker error: ' + (e.message || ''))); } };
+    numHandsCur = numHands;
     w.postMessage({ type: 'init', sources: MP_SOURCES, model: MODEL_URL, numHands, preferCpu: PREFER_CPU });
   });
 }
@@ -340,10 +369,11 @@ function workerFailed(why) {          // отдельный поток слом�
   console.warn('worker tracking failed:', why);
   if (worker) { try { worker.terminate(); } catch (_) {} worker = null; }
   workerBusy = false; detectErrors = 0;
-  loadTracker(numHandsWanted).then(lm => { landmarker = lm; }).catch(e => { console.warn(e); mode = 'pointer'; });
+  loadTracker(numHandsCur).then(lm => { landmarker = lm; }).catch(e => { console.warn(e); mode = 'pointer'; });
 }
 function detectWorker(now) {
   // первый кадр самый долгий (библиотека «разогревается»), поэтому ему даём больше времени
+  if (handsSwitching) return;
   if (workerBusy) { if (now - workerSentAt > (workerFrames < 3 ? 15000 : 5000)) workerFailed('no answer'); return; }
   if (video.readyState < 2 || now - lastDetect < detectGap() || video.currentTime === lastVideoTime) return;
   lastVideoTime = video.currentTime; lastDetect = now; workerBusy = true; workerSentAt = now;
@@ -351,6 +381,17 @@ function detectWorker(now) {
     .catch(() => { workerBusy = false; if (++bitmapErrors > 5) workerFailed('no bitmap'); });
 }
 function detect(now) { if (worker) detectWorker(now); else if (landmarker) detectMain(now); }
+// в первых сценах хватает одной руки (так быстрее), для сердца нужны две
+function wantHands(i) { return (i === scenes.length - 1 || W > H * 1.1) ? 2 : 1; }
+function setHands(n) {
+  if (mode !== 'camera' || n === numHandsCur || handsSwitching) return;
+  if (worker) { handsSwitching = true; worker.postMessage({ type: 'hands', n }); setTimeout(() => { handsSwitching = false; }, 4000); }
+  else if (landmarker) {
+    handsSwitching = true;
+    landmarker.setOptions({ numHands: n }).then(() => { numHandsCur = n; }).catch(e => console.warn('numHands', e))
+      .finally(() => { handsSwitching = false; lastVideoTime = -1; });
+  }
+}
 
 function handVisible(now) { return mode === 'camera' && hand.pts && now - hand.seenAt < seenWindow(); }
 function readInput(now) {
@@ -366,7 +407,7 @@ function drawHands(now) {
   if (handVisible(now) && !ptr.down) {
     const dot = glowSprite('rgba(255,225,236,1)');
     ctx.strokeStyle = 'rgba(255,214,228,0.42)'; ctx.lineWidth = 2; ctx.lineCap = 'round';
-    for (const pts of [hand.pts, ...hand.others]) {
+    for (const pts of hand.oPts ? [hand.pts, hand.oPts] : [hand.pts]) {
       ctx.beginPath();
       for (const [a, b] of BONES) { ctx.moveTo(pts[a].x, pts[a].y); ctx.lineTo(pts[b].x, pts[b].y); }
       ctx.stroke();
@@ -596,9 +637,10 @@ scenes.push({
   enter() { this.p = 0; this.fullAt = -1; this.burstAt = -1; this.floaters = []; this.floatAcc = 0; this.holding = false; this.ver = -1; this.phrase = null; this.fw = []; this.fwNext = 0; },
   hint(m) {
     if (this.burstAt >= 0) return '';
-    if (this.fullAt >= 0) return m === 'camera' ? 'а теперь раскрой ладонь' : 'отпусти';
+    if (this.fullAt >= 0) return m === 'camera' ? 'а теперь разведи руки' : 'отпусти';
     if (this.holding) return 'держи…';
-    return m === 'camera' ? 'сожми кулак и держи' : 'нажми и держи';
+    if (m !== 'camera') return 'нажми и держи';
+    return hand.oPts ? 'сложи руки в форме сердца и держи' : 'покажи камере обе руки и сложи их сердцем';
   },
   sprites() {                                             // контур, заливка и маленькие фигурки — рисуются один раз
     if (this.ver === layoutVer) return;
@@ -720,6 +762,7 @@ function setScene(i) {
   sceneIdx = i; scene = scenes[i]; sceneDone = false; advanceAt = 0; particles = [];
   $('gc-again').style.display = 'none'; $('gc-skip').style.display = i < scenes.length - 1 ? 'block' : 'none';
   scene.enter();
+  setHands(wantHands(i));
 }
 function goTo(i) { if (fadeDir === 1) return; pendingScene = i; fadeDir = 1; }
 $('gc-skip').onclick = () => { if (sceneIdx < scenes.length - 1) goTo(sceneIdx + 1); };
@@ -736,7 +779,7 @@ function frame(now) {
     slowT = fps < 42 ? slowT + dt : Math.max(0, slowT - dt * 2);
     if (slowT > 1.5 && quality < Q_DPR.length - 1) { quality++; slowT = 0; graceUntil = now + 2500; resize(); }
   }
-  if (mode === 'camera') { detect(now); smoothHand(dt); }
+  if (mode === 'camera') { detect(now); smoothHand(now); }
   const inp = readInput(now);
 
   if (fadeDir === 1) { fade = Math.min(1, fade + dt / 0.45); if (fade === 1) { setScene(pendingScene); fadeDir = -1; } }
@@ -800,7 +843,7 @@ $('gc-btn-cam').onclick = async () => {
   setStatus('Запрашиваю доступ к камере…');
   try { await startCamera(); } catch (e) { console.warn(e); return fallback('Камера недоступна — запускаю управление пальцем.'); }
   setStatus('Загружаю распознавание руки… это несколько секунд.');
-  numHandsWanted = W > H * 1.1 ? 2 : 1;      // на вертикальном телефоне следим за одной рукой — это заметно быстрее
+  numHandsWanted = wantHands(0);      // на вертикальном телефоне в первых сценах следим за одной рукой — это заметно быстрее
   try {
     let ok = false;
     if (USE_WORKER) { try { await startWorker(numHandsWanted); ok = true; } catch (e) { console.warn('worker tracking unavailable:', e); worker = null; } }
@@ -811,8 +854,8 @@ $('gc-btn-cam').onclick = async () => {
 $('gc-btn-ptr').onclick = () => begin('pointer');
 
 // для отладки и автотестов
-window.__card = { get state() { const now = performance.now(); return { mode, sceneIdx, sceneDone, fade, fps, quality, delegate, detectMs, worker: !!worker,
-  hand: { seen: !!handVisible(now), nExt: hand.nExt, pinch: hand.pinch, fist: hand.fist, open: hand.open, pinchRatio: hand.pinchRatio, palm: hand.palm },
+window.__card = { inject: DEBUG ? (lm => { mode = 'camera'; processHands(lm, performance.now()); }) : undefined, get state() { const now = performance.now(); return { mode, sceneIdx, sceneDone, fade, fps, quality, delegate, detectMs, worker: !!worker,
+  hand: { others: hand.others.length, numHands: numHandsCur, heart: hand.heart, dur: Math.round(hand.dur), seen: !!handVisible(now), nExt: hand.nExt, pinch: hand.pinch, fist: hand.fist, open: hand.open, pinchRatio: hand.pinchRatio, palm: hand.palm },
   scene: scene && { fw: scene.fw && scene.fw.length, lit: scene.lit, cleared: scene.cleared, open: scene.open, p: scene.p, burstAt: scene.burstAt, openedAt: scene.openedAt } }; } };
 })();
 </script>
