@@ -1,0 +1,820 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0b0c1c">
+<title>Открытка</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23ff6f9c' d='M16 28S3 20 3 11a7 7 0 0 1 13-3 7 7 0 0 1 13 3c0 9-13 17-13 17z'/%3E%3C/svg%3E">
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0c1c; overflow: hidden; overscroll-behavior: none;
+    touch-action: none; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; color: #fff; }
+  #gc-canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  /* камера нужна только для распознавания, на экране её не видно */
+  #gc-cam { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
+  #gc-start { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px;
+    background: radial-gradient(120% 90% at 50% 20%, #1c1440 0%, #0b0c1c 70%); z-index: 5; }
+  #gc-start .box { max-width: 360px; text-align: center; }
+  #gc-start h1 { font-size: 30px; line-height: 1.15; margin: 0 0 14px; font-weight: 650; }
+  #gc-start p { font-size: 16px; line-height: 1.5; margin: 0 0 12px; color: #c9c8e6; }
+  #gc-start p.small { font-size: 13px; color: #8f8fb4; margin-top: 18px; }
+  button { font: inherit; color: inherit; border: 0; cursor: pointer; }
+  .primary { display: block; width: 100%; margin: 22px 0 10px; padding: 16px 18px; border-radius: 16px; font-size: 18px;
+    font-weight: 600; background: linear-gradient(135deg, #ff7aa5, #b98cff); color: #1a0f2e; }
+  .ghost { display: block; width: 100%; padding: 13px 18px; border-radius: 16px; font-size: 15px; background: transparent;
+    color: #c9c8e6; border: 1px solid #3a3763; }
+  button:disabled { opacity: .5; }
+  #gc-status { min-height: 22px; font-size: 14px; color: #ffcfa0; margin-top: 14px; }
+  #gc-skip, #gc-again { position: fixed; z-index: 4; display: none; background: rgba(255,255,255,.08); color: #cfcfee;
+    border: 1px solid rgba(255,255,255,.14); border-radius: 999px; }
+  #gc-skip { right: 12px; top: calc(12px + env(safe-area-inset-top)); padding: 8px 14px; font-size: 13px; }
+  #gc-again { left: 50%; transform: translateX(-50%); bottom: calc(34px + env(safe-area-inset-bottom)); padding: 13px 26px; font-size: 16px; }
+  #gc-debug { position: fixed; left: 8px; top: 8px; z-index: 6; font: 11px/1.35 monospace; color: #9f9; white-space: pre; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="gc-canvas"></canvas>
+<video id="gc-cam" playsinline muted autoplay></video>
+
+<div id="gc-start">
+  <div class="box">
+    <h1 id="gc-title"></h1>
+    <p id="gc-text"></p>
+    <button class="primary" id="gc-btn-cam">Начать с камерой</button>
+    <button class="ghost" id="gc-btn-ptr">Без камеры — пальцем по экрану</button>
+    <div id="gc-status"></div>
+    <p class="small">Видео с камеры обрабатывается прямо в браузере и никуда не отправляется.</p>
+  </div>
+</div>
+<button id="gc-skip">пропустить ›</button>
+<button id="gc-again">Ещё раз</button>
+<div id="gc-debug"></div>
+
+<script>
+(() => {
+'use strict';
+
+/* =====================================================================
+   НАСТРОЙКИ — всё, что захочешь поменять, лежит здесь
+   ===================================================================== */
+const CONFIG = {
+  startTitle: 'Открытка для тебя',
+  startText: 'Она управляется рукой. Держи телефон одной рукой, а вторую покажи фронтальной камере — целиком, в 30–50 см от экрана.',
+  letterTitle: 'Сайн байна!',
+  letterText: 'Месяц назад у тебя был день рождения. Поздравление немного задержалось в тумане, но всё-таки добралось.',
+  words: ['һайхан|красивая', 'сэбэрхэн|хорошенькая', 'хөөрхэн|миленькая', 'наран|солнце', 'сэсэг|имба роум', 'жаргал|счастье'],   // до шести слов; перевод под словом — через | : 'наран|солнце'
+  finalPhrase: 'Түрэһэн үдэрөөр\nамаршалнаб!',   // «Поздравляю с днём рождения!»; перенос строки — через \n
+  finalSub: '',                     // маленькая строка под главной фразой (можно оставить пустой)
+  shape: 'heart',                   // фигура в финале: 'heart' — сердце, 'star' — звезда
+  fireworks: true,                  // салюты на фоне после финальной фразы
+
+  // Распознавание руки (MediaPipe). Менять не нужно, пока всё работает.
+  mediapipeVersion: '1.2.3',
+  modelUrl: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+};
+
+const QS = new URLSearchParams(location.search);
+const DEBUG = QS.has('debug');
+const absUrl = u => new URL(u, location.href).href;
+const MP_SOURCES = (QS.get('mp') ? [QS.get('mp')] : [
+  'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@' + CONFIG.mediapipeVersion,
+  'https://unpkg.com/@mediapipe/tasks-vision@' + CONFIG.mediapipeVersion,
+]).map(absUrl);
+const MODEL_URL = absUrl(QS.get('model') || CONFIG.modelUrl);
+const IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const PREFER_CPU = QS.has('cpu') || (IS_IOS && !QS.has('gpu'));
+// распознавание в отдельном потоке, чтобы анимация не подтормаживала (на iPhone включается через ?worker=1)
+const USE_WORKER = QS.has('worker') ? QS.get('worker') !== '0'
+  : (!IS_IOS && typeof OffscreenCanvas !== 'undefined' && typeof createImageBitmap === 'function' && typeof Worker !== 'undefined');
+const STAR = CONFIG.shape === 'star';
+
+/* ---------- маленькие помощники ----------
+   id элементов начинаются с «gc-»: короткие id вроде «dbg» превращаются в глобальные переменные
+   и ломают библиотеку распознавания. */
+const $ = id => document.getElementById(id);
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, k) => a + (b - a) * k;
+const smooth = (a, b, t) => { const x = clamp((t - a) / (b - a)); return x * x * (3 - 2 * x); };
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = arr => arr[(Math.random() * arr.length) | 0];
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const FONT = 'Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+
+/* ---------- холст ---------- */
+const canvas = $('gc-canvas'), ctx = canvas.getContext('2d', { alpha: false });
+const video = $('gc-cam');
+const Q_DPR = [2, 1.5, 1.1];            // ступени качества: если телефон не тянет, картинка становится чуть мягче
+let quality = 0, W = 0, H = 0, U = 0, DPR = 1, bgGrad = null, layoutVer = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, Q_DPR[quality]);
+  W = window.innerWidth; H = window.innerHeight;
+  U = Math.min(W, H * 0.62);                      // базовая единица размера
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+  bgGrad.addColorStop(0, '#090a1a'); bgGrad.addColorStop(1, '#1a0f30');
+  layoutVer++;
+}
+window.addEventListener('resize', resize); resize();
+
+// заранее нарисованная картинка: рисуется один раз, а потом просто копируется на экран каждый кадр
+function sprite(w, h, draw) {
+  const c = document.createElement('canvas'); c.width = Math.max(1, Math.ceil(w * DPR)); c.height = Math.max(1, Math.ceil(h * DPR));
+  const g = c.getContext('2d'); g.scale(DPR, DPR); draw(g); c.w = w; c.h = h; return c;
+}
+const glowCache = {};
+function glowSprite(color) {
+  if (glowCache[color]) return glowCache[color];
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d'), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, color); gr.addColorStop(0.25, color); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+  return (glowCache[color] = c);
+}
+function glow(x, y, r, color, alpha) {
+  if (alpha <= 0.01) return;
+  ctx.globalAlpha = Math.min(1, alpha);
+  ctx.drawImage(glowSprite(color), x - r, y - r, r * 2, r * 2);
+  ctx.globalAlpha = 1;
+}
+function text(g, str, x, y, size, color, alpha = 1, weight = 600) {
+  if (alpha <= 0.01) return;
+  g.globalAlpha = Math.min(1, alpha); g.fillStyle = color; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.font = weight + ' ' + size + 'px ' + FONT; g.fillText(str, x, y); g.globalAlpha = 1;
+}
+function wrap(str, maxW, size, weight = 400) {
+  ctx.font = weight + ' ' + size + 'px ' + FONT;
+  const lines = []; let line = '';
+  for (const w of str.split(/\s+/)) {
+    const t = line ? line + ' ' + w : w;
+    if (ctx.measureText(t).width > maxW && line) { lines.push(line); line = w; } else line = t;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+// фигура финала: сердце или звезда. Размер s — как у сердца шириной 32·s
+const SHAPE_TOP = STAR ? 14.6 : 12.2, SHAPE_BOT = STAR ? 14.6 : 17;
+function shapePath(g, cx, cy, s) {
+  g.beginPath();
+  if (STAR) {
+    for (let i = 0; i < 10; i++) {
+      const a = -Math.PI / 2 + i * Math.PI / 5, r = (i % 2 ? 6.8 : 16) * s;
+      const x = cx + r * Math.cos(a), y = cy + r * Math.sin(a) + 1.5 * s;
+      if (i) g.lineTo(x, y); else g.moveTo(x, y);
+    }
+  } else {
+    for (let i = 0; i <= 48; i++) {
+      const t = -Math.PI + i / 48 * Math.PI * 2;
+      const x = 16 * Math.sin(t) ** 3, y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+      if (i) g.lineTo(cx + x * s, cy - y * s); else g.moveTo(cx + x * s, cy - y * s);
+    }
+  }
+  g.closePath();
+}
+function roundRect(g, x, y, w, h, r) {
+  g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+
+/* =====================================================================
+   ВВОД: рука с камеры или палец на экране
+   ===================================================================== */
+let mode = 'none';                      // 'camera' | 'pointer'
+const ptr = { down: false, x: 0, y: 0 };
+canvas.addEventListener('pointerdown', e => { ptr.down = true; ptr.x = e.clientX; ptr.y = e.clientY; try { canvas.setPointerCapture(e.pointerId); } catch (_) {} });
+canvas.addEventListener('pointermove', e => { ptr.x = e.clientX; ptr.y = e.clientY; });
+const ptrUp = () => { ptr.down = false; };
+canvas.addEventListener('pointerup', ptrUp); canvas.addEventListener('pointercancel', ptrUp);
+
+let landmarker = null, stream = null, lastVideoTime = -1, lastDetect = 0, detectErrors = 0, detectMs = 0;
+let makeLandmarker = null, delegate = '', detectCount = 0;
+let worker = null, workerBusy = false, workerSentAt = 0, bitmapErrors = 0, numHandsWanted = 1, workerFrames = 0;
+// target — последние точки от распознавания, pts — то, что рисуется (плавно догоняет target каждый кадр)
+const hand = { target: null, pts: null, others: [], seenAt: -1e9, palm: { x: 0, y: 0 }, pinchPt: { x: 0, y: 0 },
+               nExt: 0, pinchRatio: 1, pinch: false, fist: false, open: false, heart: false, deb: {} };
+
+const TIPS = [8, 12, 16, 20], PIPS = [6, 10, 14, 18];
+const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+const GAIN = 1.25;   // рука в центре кадра камеры достаёт до краёв экрана
+
+function mapPoint(p) {
+  const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
+  const s = Math.max(W / vw, H / vh), dw = vw * s, dh = vh * s;
+  const x = (W - dw) / 2 + (1 - p.x) * dw, y = (H - dh) / 2 + p.y * dh;   // 1 - x: зеркало, как в селфи
+  return { x: W / 2 + (x - W / 2) * GAIN, y: H / 2 + (y - H / 2) * GAIN };
+}
+function debounce(key, raw) {
+  const s = hand.deb[key] || (hand.deb[key] = { v: false, c: 0 });
+  if (raw === s.v) s.c = 0; else if (++s.c >= 2) { s.v = raw; s.c = 0; }
+  return s.v;
+}
+function handSize(p) { return dist(p[0], p[9]) || 1; }
+// сколько ждать, прежде чем считать, что рука пропала (на медленных телефонах кадры приходят реже)
+function seenWindow() { return Math.max(280, detectMs * 2.5 + 120); }
+// пауза между распознаваниями: чем ниже качество, тем реже — остальное время уходит на анимацию
+function detectGap() { return worker ? [40, 55, 80][quality] : Math.max([50, 66, 90][quality], detectMs * 1.6); }
+
+function processHands(landmarks, now) {
+  if (!landmarks || !landmarks.length) {
+    hand.others = [];
+    if (now - hand.seenAt > 500) { hand.target = null; hand.pts = null; hand.deb = {}; }
+    return;
+  }
+  const all = landmarks.map(lm => lm.map(mapPoint));
+  if (all.length > 1) all.sort((a, b) => handSize(b) - handSize(a));    // главная рука — та, что ближе к камере
+  const p = all[0], size = handSize(p);
+  if (hand.target && dist(hand.target[9], p[9]) > size * 3) hand.pts = null;   // рука «перепрыгнула» — не тянем её через весь экран
+  hand.target = p; hand.others = all.slice(1); hand.seenAt = now;
+
+  let n = 0;
+  for (let i = 0; i < 4; i++) if (dist(p[TIPS[i]], p[0]) > dist(p[PIPS[i]], p[0]) * 1.12) n++;
+  hand.nExt = n;
+  hand.pinchRatio = dist(p[4], p[8]) / size;
+  hand.fist = debounce('fist', n === 0);
+  hand.open = debounce('open', n >= 3);
+  hand.pinch = debounce('pinch', hand.pinchRatio < (hand.pinch ? 0.55 : 0.36));
+  let heart = false;
+  if (hand.others.length) {                                  // сердце двумя руками — тоже считается
+    const q = hand.others[0], s2 = (size + handSize(q)) / 2;
+    heart = dist(p[8], q[8]) < s2 * 0.7 && dist(p[4], q[4]) < s2 * 0.7 && dist(p[0], q[0]) > s2 * 0.8;
+  }
+  hand.heart = debounce('heart', heart);
+}
+function smoothHand(dt) {
+  const t = hand.target; if (!t) return;
+  if (!hand.pts) hand.pts = t.map(p => ({ x: p.x, y: p.y }));
+  const k = 1 - Math.exp(-dt * 22), p = hand.pts;
+  for (let i = 0; i < 21; i++) { p[i].x += (t[i].x - p[i].x) * k; p[i].y += (t[i].y - p[i].y) * k; }
+  hand.palm.x = (p[0].x + p[5].x + p[9].x + p[13].x + p[17].x) / 5; hand.palm.y = (p[0].y + p[5].y + p[9].y + p[13].y + p[17].y) / 5;
+  hand.pinchPt.x = (p[4].x + p[8].x) / 2; hand.pinchPt.y = (p[4].y + p[8].y) / 2;
+}
+
+/* --- распознавание в основном потоке --- */
+function detectMain(now) {
+  if (video.readyState < 2 || now - lastDetect < detectGap() || video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime; lastDetect = now;
+  try {
+    const t0 = performance.now();
+    const res = landmarker.detectForVideo(video, now);
+    detectMs = lerp(detectMs, performance.now() - t0, 0.2);
+    processHands(res.landmarks, now); detectErrors = 0;
+    if (delegate === 'GPU' && ++detectCount === 6 && detectMs > 110) switchToCpu();   // видеокарта не тянет — считаем на процессоре
+  } catch (e) {
+    if (++detectErrors > 30) { console.warn('hand tracking stopped', e); landmarker = null; mode = 'pointer'; }
+  }
+}
+function switchToCpu() {
+  const old = landmarker; landmarker = null;
+  makeLandmarker('CPU').then(lm => { landmarker = lm; delegate = 'CPU'; detectMs = 40; try { old.close(); } catch (_) {} })
+    .catch(() => { landmarker = old; delegate = 'CPU'; });
+}
+async function loadTracker(numHands) {
+  let lastErr;
+  for (const base of MP_SOURCES) {
+    try {
+      const vision = await import(base + '/vision_bundle.mjs');
+      const files = await vision.FilesetResolver.forVisionTasks(base + '/wasm');
+      makeLandmarker = d => vision.HandLandmarker.createFromOptions(files, {
+        baseOptions: { modelAssetPath: MODEL_URL, delegate: d }, runningMode: 'VIDEO', numHands,
+      });
+      if (!PREFER_CPU) { try { const lm = await makeLandmarker('GPU'); delegate = 'GPU'; return lm; } catch (e) { console.warn('GPU delegate failed, using CPU', e); } }
+      const lm = await makeLandmarker('CPU'); delegate = 'CPU'; return lm;
+    } catch (e) { lastErr = e; console.warn('tracker source failed:', base, e); }
+  }
+  throw lastErr || new Error('no tracker');
+}
+
+/* --- распознавание в отдельном потоке (worker) --- */
+const WORKER_SRC = [
+  "let lm = null, make = null, delegate = '', n = 0, ems = 0, switching = false;",
+  "self.onmessage = async e => {",
+  "  const m = e.data;",
+  "  if (m.type === 'init') {",
+  "    let lastErr;",
+  "    for (const base of m.sources) {",
+  "      try {",
+  "        const vision = await import(base + '/vision_bundle.mjs');",
+  "        const files = await vision.FilesetResolver.forVisionTasks(base + '/wasm');",
+  "        make = d => vision.HandLandmarker.createFromOptions(files, { baseOptions: { modelAssetPath: m.model, delegate: d }, runningMode: 'VIDEO', numHands: m.numHands });",
+  "        if (!m.preferCpu) { try { lm = await make('GPU'); delegate = 'GPU'; } catch (err) { lm = null; } }",
+  "        if (!lm) { lm = await make('CPU'); delegate = 'CPU'; }",
+  "        self.postMessage({ type: 'ready', delegate }); return;",
+  "      } catch (err) { lastErr = err; }",
+  "    }",
+  "    self.postMessage({ type: 'fail', error: String(lastErr) });",
+  "  } else if (m.type === 'frame') {",
+  "    let res = null, ok = true; const t0 = performance.now();",
+  "    try { if (lm && !switching) res = lm.detectForVideo(m.bitmap, m.ts).landmarks; } catch (err) { ok = false; }",
+  "    try { m.bitmap.close(); } catch (err) {}",
+  "    const ms = performance.now() - t0; ems = ems ? ems * 0.8 + ms * 0.2 : ms;",
+  "    self.postMessage({ type: 'result', landmarks: res, ms, delegate, ok });",
+  "    if (delegate === 'GPU' && ++n === 6 && ems > 110) {",
+  "      switching = true;",
+  "      try { const old = lm; lm = await make('CPU'); delegate = 'CPU'; ems = 40; try { old.close(); } catch (err) {} } catch (err) {}",
+  "      switching = false;",
+  "    }",
+  "  }",
+  "};",
+].join('\n');
+
+function startWorker(numHands) {
+  return new Promise((resolve, reject) => {
+    let w;
+    try { w = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' }))); } catch (e) { return reject(e); }
+    const to = setTimeout(() => { w.terminate(); reject(new Error('worker timeout')); }, 35000);
+    w.onmessage = e => {
+      const m = e.data;
+      if (m.type === 'ready') { clearTimeout(to); worker = w; delegate = m.delegate + '·W'; resolve(); }
+      else if (m.type === 'fail') { clearTimeout(to); w.terminate(); reject(new Error(m.error)); }
+      else if (m.type === 'result') {
+        workerBusy = false; workerFrames++; detectMs = lerp(detectMs, m.ms, 0.2); delegate = m.delegate + '·W';
+        if (m.ok) { detectErrors = 0; processHands(m.landmarks, performance.now()); } else if (++detectErrors > 30) workerFailed('detect errors');
+      }
+    };
+    w.onerror = e => { clearTimeout(to); if (worker === w) workerFailed('worker error'); else { w.terminate(); reject(new Error('worker error: ' + (e.message || ''))); } };
+    w.postMessage({ type: 'init', sources: MP_SOURCES, model: MODEL_URL, numHands, preferCpu: PREFER_CPU });
+  });
+}
+function workerFailed(why) {          // отдельный поток сломался — тихо переходим на обычный способ
+  console.warn('worker tracking failed:', why);
+  if (worker) { try { worker.terminate(); } catch (_) {} worker = null; }
+  workerBusy = false; detectErrors = 0;
+  loadTracker(numHandsWanted).then(lm => { landmarker = lm; }).catch(e => { console.warn(e); mode = 'pointer'; });
+}
+function detectWorker(now) {
+  // первый кадр самый долгий (библиотека «разогревается»), поэтому ему даём больше времени
+  if (workerBusy) { if (now - workerSentAt > (workerFrames < 3 ? 15000 : 5000)) workerFailed('no answer'); return; }
+  if (video.readyState < 2 || now - lastDetect < detectGap() || video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime; lastDetect = now; workerBusy = true; workerSentAt = now;
+  createImageBitmap(video).then(bmp => { if (worker) worker.postMessage({ type: 'frame', bitmap: bmp, ts: now }, [bmp]); else bmp.close(); })
+    .catch(() => { workerBusy = false; if (++bitmapErrors > 5) workerFailed('no bitmap'); });
+}
+function detect(now) { if (worker) detectWorker(now); else if (landmarker) detectMain(now); }
+
+function handVisible(now) { return mode === 'camera' && hand.pts && now - hand.seenAt < seenWindow(); }
+function readInput(now) {
+  if (ptr.down) return { present: true, x: ptr.x, y: ptr.y, px: ptr.x, py: ptr.y, grab: true, hold: true, open: false, src: 'ptr' };
+  if (handVisible(now))
+    return { present: true, x: hand.palm.x, y: hand.palm.y, px: hand.pinchPt.x, py: hand.pinchPt.y,
+             grab: hand.pinch || hand.fist, hold: hand.fist || hand.heart, open: hand.open, src: 'cam' };
+  return { present: false, x: 0, y: 0, px: 0, py: 0, grab: false, hold: false, open: false, src: 'none' };
+}
+
+function drawHands(now) {
+  ctx.globalCompositeOperation = 'lighter';
+  if (handVisible(now) && !ptr.down) {
+    const dot = glowSprite('rgba(255,225,236,1)');
+    ctx.strokeStyle = 'rgba(255,214,228,0.42)'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    for (const pts of [hand.pts, ...hand.others]) {
+      ctx.beginPath();
+      for (const [a, b] of BONES) { ctx.moveTo(pts[a].x, pts[a].y); ctx.lineTo(pts[b].x, pts[b].y); }
+      ctx.stroke();
+      ctx.globalAlpha = 0.9;
+      for (let i = 0; i < 21; i++) { const r = i > 0 && i % 4 === 0 ? 13 : 10; ctx.drawImage(dot, pts[i].x - r, pts[i].y - r, r * 2, r * 2); }
+      ctx.globalAlpha = 1;
+    }
+  }
+  if (ptr.down) glow(ptr.x, ptr.y, 34, 'rgba(255,205,225,1)', 0.75);
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+/* =====================================================================
+   СЦЕНЫ
+   ===================================================================== */
+let sceneIdx = -1, scene = null, sceneDone = false, advanceAt = 0, fade = 1, fadeDir = 0, pendingScene = -1;
+let particles = [];
+function finish(delayMs) { sceneDone = true; advanceAt = performance.now() + delayMs; }
+function spawn(x, y, n, opt = {}) {
+  for (let i = 0; i < n; i++) {
+    const a = opt.angle ? rand(opt.angle[0], opt.angle[1]) : rand(0, Math.PI * 2), v = rand(opt.v0 || 40, opt.v1 || 260);
+    particles.push({ x: x + rand(-1, 1) * (opt.spread || 0), y: y + rand(-1, 1) * (opt.spread || 0), vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+      age: 0, life: rand(opt.l0 || 0.8, opt.l1 || 1.8), r: rand(4, 9), col: pick(opt.cols || ['rgba(255,225,160,1)', 'rgba(255,190,215,1)', 'rgba(255,255,255,1)']), g: opt.g == null ? 60 : opt.g });
+  }
+}
+function updateParticles(dt) {
+  if (!particles.length) return;
+  const drag = 1 - 1.6 * dt; let alive = 0;
+  for (const p of particles) {
+    p.age += dt; if (p.age >= p.life) continue;
+    p.vx *= drag; p.vy = p.vy * drag + p.g * dt; p.x += p.vx * dt; p.y += p.vy * dt; particles[alive++] = p;
+  }
+  particles.length = alive;
+}
+function drawParticles() {
+  if (!particles.length) return;
+  ctx.globalCompositeOperation = 'lighter';
+  for (const p of particles) glow(p.x, p.y, p.r, p.col, 1 - p.age / p.life);
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+const scenes = [];
+
+/* ---------- 1. Взмах — звёзды ---------- */
+scenes.push({
+  enter() {
+    const cols = ['rgba(255,255,255,1)', 'rgba(255,236,200,1)', 'rgba(210,225,255,1)', 'rgba(255,210,228,1)'];
+    this.stars = Array.from({ length: 100 }, () => ({ fx: rand(0.04, 0.96), fy: rand(0.05, 0.84), r: pick([1, 1.2, 1.4, 1.8, 2.3]), ph: rand(0, 6.28), lit: -1, col: pick(cols) }));
+    this.lit = 0;
+  },
+  hint(m) { return this.lit < this.stars.length * 0.12 ? (m === 'camera' ? 'помаши рукой' : 'проведи пальцем по небу') : ''; },
+  update(dt, inp, now) {
+    if (inp.present) {
+      const R = U * 0.24;
+      for (const s of this.stars) if (s.lit < 0) {
+        const dx = s.fx * W - inp.x, dy = s.fy * H - inp.y;
+        if (dx * dx + dy * dy < R * R) { s.lit = now + Math.random() * 180; this.lit++; }
+      }
+    }
+    if (!sceneDone && this.lit >= this.stars.length * 0.6) {
+      for (const s of this.stars) if (s.lit < 0) s.lit = now + 200 + Math.random() * 900;
+      finish(3200);
+    }
+  },
+  draw(now) {
+    const white = glowSprite('rgba(255,255,255,1)'), tw = now / 1000 * 3.2;
+    ctx.fillStyle = 'rgba(200,205,255,0.16)'; ctx.beginPath();           // ещё не зажжённые — одним контуром
+    for (const s of this.stars) if (s.lit < 0 || now < s.lit) { const x = s.fx * W, y = s.fy * H; ctx.moveTo(x + s.r, y); ctx.arc(x, y, s.r, 0, 7); }
+    ctx.fill();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const s of this.stars) {
+      if (s.lit < 0 || now < s.lit) continue;
+      const x = s.fx * W, y = s.fy * H, dt = (now - s.lit) / 1000;
+      const b = Math.min(1, dt / 0.2) * (0.72 + 0.28 * Math.sin(tw + s.ph)), fl = dt < 0.55 ? 1 - dt / 0.55 : 0;
+      let r = s.r * (5 + 10 * fl);
+      ctx.globalAlpha = b * 0.9; ctx.drawImage(glowSprite(s.col), x - r, y - r, r * 2, r * 2);
+      r = s.r * 2.4 * (1 + fl);
+      ctx.globalAlpha = b; ctx.drawImage(white, x - r, y - r, r * 2, r * 2);
+    }
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  },
+});
+
+/* ---------- 2. Ладонь — стереть туман ---------- */
+scenes.push({
+  enter() {
+    const FW = 128, FH = Math.max(64, Math.round(128 * H / W));
+    const f = document.createElement('canvas'); f.width = FW; f.height = FH;
+    const g = f.getContext('2d', { willReadFrequently: true });
+    g.fillStyle = '#5c6690'; g.fillRect(0, 0, FW, FH);
+    for (let i = 0; i < 70; i++) {                       // облачные пятна
+      const x = rand(0, FW), y = rand(0, FH), r = rand(10, 38), light = Math.random() < 0.55;
+      const gr = g.createRadialGradient(x, y, 0, x, y, r);
+      gr.addColorStop(0, light ? 'rgba(170,180,215,0.22)' : 'rgba(50,56,90,0.22)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = gr; g.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    const b = document.createElement('canvas'); b.width = b.height = 64;      // «кисть», которой стирается туман
+    const bg = b.getContext('2d'), br = bg.createRadialGradient(32, 32, 0, 32, 32, 32);
+    br.addColorStop(0, 'rgba(0,0,0,0.55)'); br.addColorStop(1, 'rgba(0,0,0,0)'); bg.fillStyle = br; bg.fillRect(0, 0, 64, 64);
+    this.fog = f; this.fg = g; this.brush = b; this.fogAlpha = 1; this.clearing = false; this.cleared = 0; this.frame = 0; this.prev = null; this.ver = -1;
+  },
+  card() {                                                // письмо рисуется один раз и дальше копируется
+    if (this.ver === layoutVer) return this.c;
+    const cw = Math.min(W * 0.86, U * 0.92), ts = U * 0.105, bs = Math.max(15, U * 0.05), pad = U * 0.07;
+    const lines = wrap(CONFIG.letterText, cw - pad * 2, bs, 400);
+    const ch = pad * 2 + ts * 1.25 + lines.length * bs * 1.5 + U * 0.16, M = 26;
+    const c = { x: (W - cw) / 2, y: H * 0.44 - ch / 2, w: cw, h: ch, M };
+    c.img = sprite(cw + M * 2, ch + M * 2, g => {
+      g.fillStyle = 'rgba(44,34,78,0.96)'; roundRect(g, M, M, cw, ch, 14); g.fill();
+      g.save(); g.shadowColor = 'rgba(200,140,255,0.8)'; g.shadowBlur = 16; g.strokeStyle = 'rgba(205,150,230,0.9)'; g.lineWidth = 1.5;
+      roundRect(g, M, M, cw, ch, 14); g.stroke(); g.restore();
+      let y = M + pad + ts * 0.6;
+      text(g, CONFIG.letterTitle, M + cw / 2, y, ts, '#fff', 1, 650);
+      y += ts * 0.65 + bs * 0.9;
+      for (const l of lines) { text(g, l, M + cw / 2, y, bs, '#e1d7f0', 1, 400); y += bs * 1.5; }
+      c.iconY = c.y + (y - M) + U * 0.045;
+    });
+    this.ver = layoutVer; return (this.c = c);
+  },
+  hint(m) { return !this.clearing && this.cleared < 0.12 ? (m === 'camera' ? 'сотри туман ладонью' : 'сотри туман пальцем') : ''; },
+  wipe(x, y) {
+    const kx = this.fog.width / W, ky = this.fog.height / H, r = U * 0.2 * kx;
+    this.fg.drawImage(this.brush, x * kx - r, y * ky - r, r * 2, r * 2);
+  },
+  update(dt, inp) {
+    if (inp.present && !this.clearing) {
+      const a = this.prev || inp, n = Math.max(1, Math.min(10, Math.round(Math.hypot(inp.x - a.x, inp.y - a.y) / (U * 0.07))));
+      this.fg.globalCompositeOperation = 'destination-out';
+      for (let i = 1; i <= n; i++) this.wipe(lerp(a.x, inp.x, i / n), lerp(a.y, inp.y, i / n));
+      this.fg.globalCompositeOperation = 'source-over';
+      this.prev = { x: inp.x, y: inp.y };
+    } else this.prev = null;
+    if (!this.clearing && ++this.frame % 15 === 0) {
+      const c = this.card(), kx = this.fog.width / W, ky = this.fog.height / H;
+      const d = this.fg.getImageData(Math.floor(c.x * kx), Math.floor(c.y * ky), Math.max(1, Math.floor(c.w * kx)), Math.max(1, Math.floor(c.h * ky))).data;
+      let sum = 0; for (let i = 3; i < d.length; i += 4) sum += d[i];
+      this.cleared = 1 - sum / (d.length / 4) / 255;
+      if (this.cleared > 0.6) this.clearing = true;       // стёр больше половины — остальное уходит само
+    }
+    if (this.clearing) {
+      this.fogAlpha = Math.max(0, this.fogAlpha - dt / 0.9);
+      if (this.fogAlpha === 0 && !sceneDone) finish(6000);
+    }
+  },
+  draw(now) {
+    const c = this.card();
+    ctx.drawImage(c.img, c.x - c.M, c.y - c.M, c.img.w, c.img.h);
+    ctx.fillStyle = '#ff6f9c'; shapePath(ctx, W / 2, c.iconY, U * 0.0042 * (1 + 0.06 * Math.sin(now / 400))); ctx.fill();
+    if (this.fogAlpha > 0) { ctx.globalAlpha = 0.985 * this.fogAlpha; ctx.drawImage(this.fog, 0, 0, W, H); ctx.globalAlpha = 1; }
+  },
+});
+
+/* ---------- 3. Щепоть — открыть конверт ---------- */
+scenes.push({
+  enter() { this.open = 0; this.grabbing = false; this.openedAt = -1; this.sparkAcc = 0; },
+  geo() {
+    const ew = U * 0.64, eh = ew * 0.64, cx = W / 2, cy = H * 0.58;
+    const x0 = cx - ew / 2, x1 = cx + ew / 2, y0 = cy - eh / 2, y1 = cy + eh / 2;
+    return { ew, eh, cx, x0, x1, y0, y1, apexY: lerp(y0 + eh * 0.54, y0 - eh * 0.5, this.open), notchY: y0 + eh * 0.48 };
+  },
+  hint(m) {
+    if (this.openedAt >= 0) return '';
+    if (this.grabbing) return 'тяни вверх';
+    return m === 'camera' ? 'возьми конверт щепотью и потяни вверх' : 'потяни клапан конверта вверх';
+  },
+  update(dt, inp, now) {
+    const g = this.geo();
+    this.near = inp.present && Math.hypot(inp.px - g.cx, inp.py - g.apexY) < U * 0.3;
+    if (this.openedAt < 0) {
+      if (inp.present && inp.grab) {
+        if (!this.grabbing && (this.near || this.open > 0.05)) { this.grabbing = true; this.startY = inp.py; this.startOpen = this.open; }
+        if (this.grabbing) this.open = Math.max(this.open, clamp(this.startOpen + (this.startY - inp.py) / (H * 0.2)));
+      } else this.grabbing = false;
+      if (this.open >= 1) { this.openedAt = now; this.grabbing = false; finish(7000); spawn(g.cx, g.y0, 30, { angle: [-2.7, -0.45], v0: 120, v1: 420, l0: 0.9, l1: 1.7 }); }
+    } else {
+      this.sparkAcc += dt;
+      if (now - this.openedAt < 2600 && this.sparkAcc > 0.08) { this.sparkAcc = 0; spawn(g.cx, g.y0, 2, { angle: [-2.6, -0.55], v0: 100, v1: 380, l0: 0.9, l1: 1.7, spread: 8 }); }
+    }
+    this.pin = inp.present && (this.grabbing || this.near) ? { x: inp.px, y: inp.py } : null;
+  },
+  draw(now) {
+    const g = this.geo(), t = this.openedAt < 0 ? 0 : (now - this.openedAt) / 1000, rise = smooth(0, 1.2, t);
+    const edge = '#ffc8d7';
+    const flap = () => {
+      ctx.fillStyle = g.apexY > g.y0 ? '#a85c78' : '#96506c';
+      ctx.beginPath(); ctx.moveTo(g.x0, g.y0); ctx.lineTo(g.x1, g.y0); ctx.lineTo(g.cx, g.apexY); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = edge; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.beginPath(); ctx.moveTo(g.x0, g.y0); ctx.lineTo(g.cx, g.apexY); ctx.lineTo(g.x1, g.y0); ctx.stroke();
+    };
+    ctx.fillStyle = '#783e5c'; ctx.fillRect(g.x0, g.y0, g.ew, g.eh);
+    if (g.apexY <= g.y0) flap();
+    if (rise > 0) {                                           // письмо выезжает из конверта
+      const lw = g.ew * 0.84, lh = g.eh * 0.95, ly = lerp(g.y0 + g.eh * 0.1, g.y0 - g.eh * 0.72, rise);
+      ctx.fillStyle = '#faf0e4'; ctx.fillRect(g.cx - lw / 2, ly, lw, Math.min(lh, g.y1 - ly - 2));
+      ctx.fillStyle = '#cdb9b9';
+      for (let i = 0; i < 4; i++) ctx.fillRect(g.cx - lw * 0.4, ly + lh * (0.16 + i * 0.13), lw * [0.66, 0.78, 0.56, 0.72][i], Math.max(2, lh * 0.035));
+    }
+    ctx.fillStyle = '#c4768e'; ctx.beginPath(); ctx.moveTo(g.x0, g.y0); ctx.lineTo(g.cx, g.notchY); ctx.lineTo(g.x1, g.y0); ctx.lineTo(g.x1, g.y1); ctx.lineTo(g.x0, g.y1); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,200,215,0.75)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(g.x0, g.y0); ctx.lineTo(g.cx, g.notchY); ctx.lineTo(g.x1, g.y0); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,200,215,0.35)'; ctx.lineWidth = 1; ctx.beginPath();
+    ctx.moveTo(g.x0, g.y1); ctx.lineTo(g.cx - g.ew * 0.14, g.y0 + g.eh * 0.32); ctx.moveTo(g.x1, g.y1); ctx.lineTo(g.cx + g.ew * 0.14, g.y0 + g.eh * 0.32); ctx.stroke();
+    ctx.strokeStyle = edge; ctx.lineWidth = 2; ctx.strokeRect(g.x0, g.y0, g.ew, g.eh);
+    if (g.apexY > g.y0) flap();
+    if (this.openedAt < 0) {                                  // подсветка: за что браться
+      const pulse = 0.5 + 0.5 * Math.sin(now / 260), a = this.grabbing ? 1 : this.near ? 0.9 : 0.45;
+      ctx.strokeStyle = 'rgba(255,215,140,' + a + ')'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(g.cx, g.apexY, U * 0.035 + pulse * U * 0.012, 0, 7); ctx.stroke();
+      if (this.pin && this.grabbing) { ctx.globalCompositeOperation = 'lighter'; glow(this.pin.x, this.pin.y, U * 0.07, 'rgba(255,215,140,1)', 0.8); ctx.globalCompositeOperation = 'source-over'; }
+    }
+    if (this.openedAt >= 0) {                                 // слова вылетают
+      const pos = [[0.26, 0.27], [0.74, 0.27], [0.5, 0.21], [0.27, 0.14], [0.73, 0.14], [0.5, 0.08]];
+      const cols = ['#ffbed2', '#ffe1a0', '#c8d7ff', '#ffc8e1', '#ffebbe', '#d7c8ff'];
+      const size = Math.max(18, U * 0.068);
+      CONFIG.words.slice(0, 6).forEach((w, i) => {
+        const k = smooth(0.7 + i * 0.38, 1.9 + i * 0.38, t); if (k <= 0) return;
+        const [word, tr] = String(w).split('|');
+        ctx.font = '650 ' + size + 'px ' + FONT;
+        const half = ctx.measureText(word).width / 2 + 10;            // слово не вылезает за край экрана
+        const x = clamp(lerp(g.cx, pos[i][0] * W, k), half, W - half), y = lerp(g.y0 - g.eh * 0.2, pos[i][1] * H, k) + 5 * Math.sin(now / 620 + i);
+        text(ctx, word, x, y, size, cols[i], k, 650);
+        if (tr) text(ctx, tr, x, y + size * 0.82, Math.max(11, size * 0.42), '#b9b4d8', k * 0.85, 500);
+      });
+    }
+  },
+});
+
+/* ---------- 4. Кулак — наполнить фигуру ---------- */
+scenes.push({
+  enter() { this.p = 0; this.fullAt = -1; this.burstAt = -1; this.floaters = []; this.floatAcc = 0; this.holding = false; this.ver = -1; this.phrase = null; this.fw = []; this.fwNext = 0; },
+  hint(m) {
+    if (this.burstAt >= 0) return '';
+    if (this.fullAt >= 0) return m === 'camera' ? 'а теперь раскрой ладонь' : 'отпусти';
+    if (this.holding) return 'держи…';
+    return m === 'camera' ? 'сожми кулак и держи' : 'нажми и держи';
+  },
+  sprites() {                                             // контур, заливка и маленькие фигурки — рисуются один раз
+    if (this.ver === layoutVer) return;
+    const s = this.s = U * 0.0135, B = this.B = 44 * s;
+    this.outline = sprite(B, B, g => {
+      g.shadowColor = 'rgba(255,110,160,0.95)'; g.shadowBlur = 18; g.strokeStyle = '#ff9fbe'; g.lineWidth = 2.5; g.lineJoin = 'round';
+      shapePath(g, B / 2, B / 2, s); g.stroke(); g.stroke();
+    });
+    this.fill = sprite(B, B, g => {
+      const gr = g.createLinearGradient(0, B / 2 - SHAPE_TOP * s, 0, B / 2 + SHAPE_BOT * s); gr.addColorStop(0, '#ff7aa8'); gr.addColorStop(1, '#e83e78');
+      g.fillStyle = gr; shapePath(g, B / 2, B / 2, s); g.fill();
+    });
+    const fs = U * 0.0028, FB = 44 * fs;
+    this.small = ['#ff5f8c', '#ff96b9', '#ffc8d7'].map(col => sprite(FB, FB, g => { g.fillStyle = col; shapePath(g, FB / 2, FB / 2, fs); g.fill(); }));
+    this.FB = FB; this.phrase = null; this.ver = layoutVer;
+  },
+  phraseSprite() {                                        // главная фраза со свечением — тоже один раз
+    if (this.phrase) return this.phrase;
+    const lines = String(CONFIG.finalPhrase).split('\n'); let size = U * 0.17;
+    ctx.font = '650 ' + size + 'px ' + FONT;
+    const tw = Math.max(...lines.map(l => ctx.measureText(l).width)); if (tw > W * 0.86) size *= W * 0.86 / tw;
+    const sub = CONFIG.finalSub ? Math.max(15, U * 0.052) : 0, pad = 44;
+    const h = lines.length * size * 1.18 + (sub ? sub * 2.1 : 0) + pad * 2;
+    return (this.phrase = sprite(W, h, g => {
+      g.shadowColor = 'rgba(255,110,155,0.95)'; g.shadowBlur = 26;
+      lines.forEach((l, i) => text(g, l, W / 2, pad + size * 0.6 + i * size * 1.18, size, '#fff', 1, 650));
+      g.shadowBlur = 10;
+      if (sub) text(g, CONFIG.finalSub, W / 2, pad + lines.length * size * 1.18 + sub * 1.1, sub, '#ffd3e0', 1, 500);
+    }));
+  },
+  update(dt, inp, now) {
+    this.holding = inp.present && inp.hold;
+    const cy = H * 0.42;
+    if (this.burstAt < 0) {
+      if (this.fullAt < 0) {
+        this.p = clamp(this.p + (this.holding ? dt / 2.2 : -dt * 0.25));
+        if (this.p >= 1) this.fullAt = now;
+      } else if ((now - this.fullAt > 450 && !this.holding) || now - this.fullAt > 3000) {
+        this.burstAt = now; finish(1e12);
+        spawn(W / 2, cy, 110, { v0: 60, v1: U * 1.5, l0: 1.1, l1: 2.4, spread: U * 0.12, g: 40, cols: ['rgba(255,95,140,1)', 'rgba(255,150,180,1)', 'rgba(255,215,150,1)', 'rgba(255,255,255,1)'] });
+        setTimeout(() => { if (scene === this) $('gc-again').style.display = 'block'; }, 4500);
+      }
+    } else {
+      this.floatAcc += dt;
+      if (this.floatAcc > 0.45 && this.floaters.length < 18) { this.floatAcc = 0; this.floaters.push({ x: rand(0.08, 0.92) * W, y: H + 20, v: rand(35, 70), s: rand(0.5, 1.1), ph: rand(0, 6.28), k: (Math.random() * 3) | 0 }); }
+      let alive = 0;
+      for (const h of this.floaters) { h.y -= h.v * dt; if (h.y > -30) this.floaters[alive++] = h; }
+      this.floaters.length = alive;
+      if (CONFIG.fireworks && now - this.burstAt > 700 && now >= this.fwNext) this.launch(now);
+      this.fw = this.fw.filter(f => now - f.t0 < f.life * 1000 + 100);
+    }
+  },
+  launch(now) {                                           // салюты: сразу несколько штук в разных местах
+    const cols = ['rgba(255,214,120,1)', 'rgba(255,120,170,1)', 'rgba(120,220,255,1)', 'rgba(190,140,255,1)',
+                  'rgba(140,255,170,1)', 'rgba(255,160,90,1)', 'rgba(255,255,255,1)'];
+    const n = 2 + ((Math.random() * 3) | 0), count = [44, 34, 26][quality], cy = H * 0.42;
+    let delay = 0;
+    for (let i = 0; i < n; i++) {
+      let x, y, tries = 0;
+      do { x = rand(0.1, 0.9) * W; y = rand(0.07, 0.72) * H; }
+      while (++tries < 6 && Math.abs(y - cy) < H * 0.11 && Math.abs(x - W / 2) < W * 0.36);   // не прямо за текстом
+      const col = pick(cols), col2 = Math.random() < 0.35 ? pick(cols) : col, R = U * rand(0.26, 0.42), parts = [];
+      for (let j = 0; j < count; j++) {
+        const a = j / count * Math.PI * 2 + rand(-0.08, 0.08);
+        parts.push({ c: Math.cos(a), s: Math.sin(a), v: R * (Math.random() < 0.7 ? rand(0.8, 1.0) : rand(0.3, 0.75)), r: rand(5.5, 9), col: j % 2 ? col2 : col });
+      }
+      this.fw.push({ x, y, t0: now + delay, life: rand(1.4, 1.9), col, parts });
+      delay += rand(90, 320);
+    }
+    this.fwNext = now + delay + rand(500, 1000);
+  },
+  drawFireworks(now) {
+    if (!this.fw.length) return;
+    ctx.globalCompositeOperation = 'lighter';
+    const trail = quality === 0, K = 2.4;
+    for (const f of this.fw) {
+      const t = (now - f.t0) / 1000; if (t < 0) continue;
+      if (t < 0.25) glow(f.x, f.y, U * 0.16 * (0.5 + t / 0.25), f.col, (1 - t / 0.25) * 0.9);
+      const fade = clamp(1 - t / f.life), spread = (1 - Math.exp(-K * t)), drop = 30 * t * t;
+      for (const p of f.parts) {
+        const d = p.v * spread, x = f.x + p.c * d, y = f.y + p.s * d + drop;
+        const tw = t > f.life * 0.6 ? 0.6 + 0.4 * Math.sin(now / 45 + p.v) : 1;
+        glow(x, y, p.r, p.col, fade * tw);
+        if (trail) { const d2 = p.v * (1 - Math.exp(-K * Math.max(0, t - 0.07))); glow(f.x + p.c * d2, f.y + p.s * d2 + drop * 0.85, p.r * 0.7, p.col, fade * 0.35); }
+      }
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  },
+  draw(now) {
+    this.sprites();
+    const cx = W / 2, cy = H * 0.42, s = this.s, B = this.B;
+    if (this.burstAt < 0) {
+      const k = 1 + 0.035 * Math.sin(now / 150) * (this.holding || this.fullAt >= 0 ? 1 : 0.3), D = B * k;
+      if (this.p > 0) {
+        ctx.globalCompositeOperation = 'lighter'; glow(cx, cy, 20 * s * (1 + 0.3 * this.p), 'rgba(255,90,140,1)', 0.12 + 0.3 * this.p); ctx.globalCompositeOperation = 'source-over';
+        const level = lerp(B / 2 + SHAPE_BOT * s, B / 2 - SHAPE_TOP * s, this.p);      // заливка снизу вверх
+        ctx.drawImage(this.fill, 0, level * DPR, this.fill.width, this.fill.height - level * DPR, cx - D / 2, cy - D / 2 + level * k, D, (B - level) * k);
+      }
+      ctx.globalAlpha = 0.8 + 0.2 * this.p; ctx.drawImage(this.outline, cx - D / 2, cy - D / 2, D, D); ctx.globalAlpha = 1;
+      if (this.p > 0.01 && this.fullAt < 0) text(ctx, Math.round(this.p * 100) + '%', cx, cy + SHAPE_BOT * s + U * 0.08, Math.max(15, U * 0.05), '#ffc8d7', 0.9, 500);
+    } else {
+      const t = (now - this.burstAt) / 1000, a = smooth(0.3, 1.2, t);
+      this.drawFireworks(now);
+      for (const h of this.floaters) {
+        const d = this.FB * h.s;
+        ctx.globalAlpha = clamp((h.y - H * 0.08) / (H * 0.25)) * 0.85;
+        ctx.drawImage(this.small[h.k], h.x + 14 * Math.sin(now / 700 + h.ph) - d / 2, h.y - d / 2, d, d);
+      }
+      const ph = this.phraseSprite();
+      ctx.globalAlpha = a; ctx.drawImage(ph, 0, cy - ph.h / 2 + 10 * (1 - a), ph.w, ph.h); ctx.globalAlpha = 1;
+    }
+  },
+});
+
+/* =====================================================================
+   ГЛАВНЫЙ ЦИКЛ
+   ===================================================================== */
+function setScene(i) {
+  sceneIdx = i; scene = scenes[i]; sceneDone = false; advanceAt = 0; particles = [];
+  $('gc-again').style.display = 'none'; $('gc-skip').style.display = i < scenes.length - 1 ? 'block' : 'none';
+  scene.enter();
+}
+function goTo(i) { if (fadeDir === 1) return; pendingScene = i; fadeDir = 1; }
+$('gc-skip').onclick = () => { if (sceneIdx < scenes.length - 1) goTo(sceneIdx + 1); };
+$('gc-again').onclick = () => goTo(0);
+
+let hintText = '', hintShown = '', hintLines = [], hintAlpha = 0, lastT = 0, running = false, fps = 60, slowT = 0, graceUntil = 0, dbgAt = 0;
+function frame(now) {
+  if (!running) return;
+  requestAnimationFrame(frame);
+  const rawDt = (now - lastT) / 1000 || 0.016, dt = Math.min(0.05, rawDt); lastT = now;
+  if (rawDt < 0.25) fps = lerp(fps, 1 / rawDt, 0.05);
+  // если кадров мало — понижаем чёткость картинки на ступень (на глаз почти незаметно, а работает быстрее)
+  if (now > graceUntil) {
+    slowT = fps < 42 ? slowT + dt : Math.max(0, slowT - dt * 2);
+    if (slowT > 1.5 && quality < Q_DPR.length - 1) { quality++; slowT = 0; graceUntil = now + 2500; resize(); }
+  }
+  if (mode === 'camera') { detect(now); smoothHand(dt); }
+  const inp = readInput(now);
+
+  if (fadeDir === 1) { fade = Math.min(1, fade + dt / 0.45); if (fade === 1) { setScene(pendingScene); fadeDir = -1; } }
+  else if (fadeDir === -1) { fade = Math.max(0, fade - dt / 0.55); if (fade === 0) fadeDir = 0; }
+  else { scene.update(dt, inp, now); if (sceneDone && now > advanceAt && sceneIdx < scenes.length - 1) goTo(sceneIdx + 1); }
+  updateParticles(dt);
+
+  ctx.fillStyle = bgGrad; ctx.fillRect(0, 0, W, H);
+  if (DEBUG && mode === 'camera' && video.videoWidth) {       // ?debug — видно, что видит камера
+    const vw = video.videoWidth, vh = video.videoHeight, s = Math.max(W / vw, H / vh) * GAIN;
+    ctx.save(); ctx.globalAlpha = 0.4; ctx.translate(W / 2, H / 2); ctx.scale(-s, s); ctx.drawImage(video, -vw / 2, -vh / 2); ctx.restore();
+  }
+  scene.draw(now);
+  drawParticles();
+  drawHands(now);
+
+  hintText = fadeDir === 0 ? scene.hint(mode) : '';
+  if (hintText === hintShown) hintAlpha = Math.min(1, hintAlpha + dt / 0.35);
+  else { hintAlpha -= dt / 0.25; if (hintAlpha <= 0) { hintAlpha = 0; hintShown = hintText; hintLines = hintShown ? wrap(hintShown, W * 0.84, Math.max(16, Math.min(24, U * 0.052)), 500) : []; } }
+  if (hintShown && hintAlpha > 0) {
+    const hs = Math.max(16, Math.min(24, U * 0.052)), a = hintAlpha * (0.8 + 0.2 * Math.sin(now / 420));
+    hintLines.forEach((l, i) => text(ctx, l, W / 2, Math.max(62, H * 0.115) + i * hs * 1.35 - (hintLines.length - 1) * hs * 0.6, hs, '#d2d2f0', a, 500));
+  }
+  if (mode === 'camera' && !ptr.down && now - hand.seenAt > 2500 && !sceneDone && fadeDir === 0)
+    text(ctx, 'покажи руку камере целиком · или води пальцем', W / 2, H - 34, Math.max(12, U * 0.034), '#8f8fb4', 0.9, 400);
+
+  if (fade > 0) { ctx.fillStyle = 'rgba(8,8,20,' + fade + ')'; ctx.fillRect(0, 0, W, H); }
+  if (DEBUG && now - dbgAt > 250) {
+    dbgAt = now;
+    $('gc-debug').textContent = `fps ${fps.toFixed(0)}  det ${detectMs.toFixed(0)}ms ${delegate}  q${quality} dpr ${DPR}  mode ${mode}  src ${inp.src}\n` +
+      `ext ${hand.nExt} pinch ${hand.pinchRatio.toFixed(2)} ${hand.pinch ? 'PINCH ' : ''}${hand.fist ? 'FIST ' : ''}${hand.open ? 'OPEN ' : ''}${hand.heart ? 'HEART' : ''}\nscene ${sceneIdx + 1} done ${sceneDone}  cam ${video.videoWidth}x${video.videoHeight}`;
+  }
+}
+
+/* =====================================================================
+   ЗАПУСК
+   ===================================================================== */
+const setStatus = s => { $('gc-status').textContent = s; };
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('no camera api');
+  // маленькое разрешение: руке его хватает, а телефону намного легче
+  stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 360 }, frameRate: { ideal: 30, max: 30 } }, audio: false });
+  video.srcObject = stream;
+  await video.play();
+}
+function begin(m) {
+  mode = m; $('gc-start').style.display = 'none';
+  if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(() => {});   // чтобы экран не гас, пока машешь рукой
+  fade = 1; fadeDir = -1; setScene(0);
+  running = true; lastT = performance.now(); graceUntil = lastT + 2500; requestAnimationFrame(frame);
+}
+function fallback(msg) {
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  setStatus(msg); setTimeout(() => begin('pointer'), 2200);
+}
+$('gc-title').textContent = CONFIG.startTitle; $('gc-text').textContent = CONFIG.startText; document.title = CONFIG.startTitle;
+$('gc-btn-cam').onclick = async () => {
+  $('gc-btn-cam').disabled = $('gc-btn-ptr').disabled = true;
+  setStatus('Запрашиваю доступ к камере…');
+  try { await startCamera(); } catch (e) { console.warn(e); return fallback('Камера недоступна — запускаю управление пальцем.'); }
+  setStatus('Загружаю распознавание руки… это несколько секунд.');
+  numHandsWanted = W > H * 1.1 ? 2 : 1;      // на вертикальном телефоне следим за одной рукой — это заметно быстрее
+  try {
+    let ok = false;
+    if (USE_WORKER) { try { await startWorker(numHandsWanted); ok = true; } catch (e) { console.warn('worker tracking unavailable:', e); worker = null; } }
+    if (!ok) landmarker = await withTimeout(loadTracker(numHandsWanted), 40000);
+  } catch (e) { console.warn(e); return fallback('Распознавание руки не загрузилось — запускаю управление пальцем.'); }
+  setStatus(''); begin('camera');
+};
+$('gc-btn-ptr').onclick = () => begin('pointer');
+
+// для отладки и автотестов
+window.__card = { get state() { const now = performance.now(); return { mode, sceneIdx, sceneDone, fade, fps, quality, delegate, detectMs, worker: !!worker,
+  hand: { seen: !!handVisible(now), nExt: hand.nExt, pinch: hand.pinch, fist: hand.fist, open: hand.open, pinchRatio: hand.pinchRatio, palm: hand.palm },
+  scene: scene && { fw: scene.fw && scene.fw.length, lit: scene.lit, cleared: scene.cleared, open: scene.open, p: scene.p, burstAt: scene.burstAt, openedAt: scene.openedAt } }; } };
+})();
+</script>
+</body>
+</html>
