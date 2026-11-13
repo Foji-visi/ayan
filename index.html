@@ -68,6 +68,7 @@ const CONFIG = {
   finalSub: '',                     // маленькая строка под главной фразой (можно оставить пустой)
   shape: 'heart',                   // фигура в финале: 'heart' — сердце, 'star' — звезда
   fireworks: true,                  // салюты на фоне после финальной фразы
+  touchControl: false,              // false — только руки перед камерой, без управления пальцем по экрану
 
   // Распознавание руки (MediaPipe). Менять не нужно, пока всё работает.
   mediapipeVersion: '1.2.3',
@@ -395,7 +396,7 @@ function setHands(n) {
 
 function handVisible(now) { return mode === 'camera' && hand.pts && now - hand.seenAt < seenWindow(); }
 function readInput(now) {
-  if (ptr.down) return { present: true, x: ptr.x, y: ptr.y, px: ptr.x, py: ptr.y, grab: true, hold: true, open: false, src: 'ptr' };
+  if (ptr.down && CONFIG.touchControl) return { present: true, x: ptr.x, y: ptr.y, px: ptr.x, py: ptr.y, grab: true, hold: true, open: false, src: 'ptr' };
   if (handVisible(now))
     return { present: true, x: hand.palm.x, y: hand.palm.y, px: hand.pinchPt.x, py: hand.pinchPt.y,
              grab: hand.pinch || hand.fist, hold: hand.fist || hand.heart, open: hand.open, src: 'cam' };
@@ -404,7 +405,7 @@ function readInput(now) {
 
 function drawHands(now) {
   ctx.globalCompositeOperation = 'lighter';
-  if (handVisible(now) && !ptr.down) {
+  if (handVisible(now) && !(ptr.down && CONFIG.touchControl)) {
     const dot = glowSprite('rgba(255,225,236,1)');
     ctx.strokeStyle = 'rgba(255,214,228,0.42)'; ctx.lineWidth = 2; ctx.lineCap = 'round';
     for (const pts of hand.oPts ? [hand.pts, hand.oPts] : [hand.pts]) {
@@ -416,7 +417,7 @@ function drawHands(now) {
       ctx.globalAlpha = 1;
     }
   }
-  if (ptr.down) glow(ptr.x, ptr.y, 34, 'rgba(255,205,225,1)', 0.75);
+  if (ptr.down && CONFIG.touchControl) glow(ptr.x, ptr.y, 34, 'rgba(255,205,225,1)', 0.75);
   ctx.globalCompositeOperation = 'source-over';
 }
 
@@ -637,7 +638,7 @@ scenes.push({
   enter() { this.p = 0; this.fullAt = -1; this.burstAt = -1; this.floaters = []; this.floatAcc = 0; this.holding = false; this.ver = -1; this.phrase = null; this.fw = []; this.fwNext = 0; },
   hint(m) {
     if (this.burstAt >= 0) return '';
-    if (this.fullAt >= 0) return m === 'camera' ? 'а теперь разведи руки' : 'отпусти';
+    if (this.fullAt >= 0) return m === 'camera' ? 'а теперь раскрой ладонь' : 'отпусти';
     if (this.holding) return 'держи…';
     if (m !== 'camera') return 'нажми и держи';
     return hand.oPts ? 'сложи руки в форме сердца и держи' : 'покажи камере обе руки и сложи их сердцем';
@@ -803,8 +804,8 @@ function frame(now) {
     const hs = Math.max(16, Math.min(24, U * 0.052)), a = hintAlpha * (0.8 + 0.2 * Math.sin(now / 420));
     hintLines.forEach((l, i) => text(ctx, l, W / 2, Math.max(62, H * 0.115) + i * hs * 1.35 - (hintLines.length - 1) * hs * 0.6, hs, '#d2d2f0', a, 500));
   }
-  if (mode === 'camera' && !ptr.down && now - hand.seenAt > 2500 && !sceneDone && fadeDir === 0)
-    text(ctx, 'покажи руку камере целиком · или води пальцем', W / 2, H - 34, Math.max(12, U * 0.034), '#8f8fb4', 0.9, 400);
+  if (mode === 'camera' && !(ptr.down && CONFIG.touchControl) && now - hand.seenAt > 2500 && !sceneDone && fadeDir === 0)
+    text(ctx, CONFIG.touchControl ? 'покажи руку камере целиком · или води пальцем' : 'покажи руку камере целиком', W / 2, H - 34, Math.max(12, U * 0.034), '#8f8fb4', 0.9, 400);
 
   if (fade > 0) { ctx.fillStyle = 'rgba(8,8,20,' + fade + ')'; ctx.fillRect(0, 0, W, H); }
   if (DEBUG && now - dbgAt > 250) {
@@ -835,20 +836,26 @@ function begin(m) {
 }
 function fallback(msg) {
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
-  setStatus(msg); setTimeout(() => begin('pointer'), 2200);
+  if (CONFIG.touchControl) { setStatus(msg); setTimeout(() => begin('pointer'), 2200); return; }
+  // без управления пальцем открытка работает только с камерой — объясняем и даём попробовать ещё раз
+  setStatus(msg); $('gc-btn-cam').disabled = false; $('gc-btn-cam').textContent = 'Попробовать ещё раз';
 }
+if (!CONFIG.touchControl) $('gc-btn-ptr').style.display = 'none';
 $('gc-title').textContent = CONFIG.startTitle; $('gc-text').textContent = CONFIG.startText; document.title = CONFIG.startTitle;
 $('gc-btn-cam').onclick = async () => {
   $('gc-btn-cam').disabled = $('gc-btn-ptr').disabled = true;
   setStatus('Запрашиваю доступ к камере…');
-  try { await startCamera(); } catch (e) { console.warn(e); return fallback('Камера недоступна — запускаю управление пальцем.'); }
+  if (worker) { try { worker.terminate(); } catch (_) {} worker = null; }
+  try { await startCamera(); } catch (e) { console.warn(e); return fallback(CONFIG.touchControl ? 'Камера недоступна — запускаю управление пальцем.'
+    : 'Нет доступа к камере. Разреши его в настройках браузера для этого сайта и нажми ещё раз.'); }
   setStatus('Загружаю распознавание руки… это несколько секунд.');
   numHandsWanted = wantHands(0);      // на вертикальном телефоне в первых сценах следим за одной рукой — это заметно быстрее
   try {
     let ok = false;
     if (USE_WORKER) { try { await startWorker(numHandsWanted); ok = true; } catch (e) { console.warn('worker tracking unavailable:', e); worker = null; } }
     if (!ok) landmarker = await withTimeout(loadTracker(numHandsWanted), 40000);
-  } catch (e) { console.warn(e); return fallback('Распознавание руки не загрузилось — запускаю управление пальцем.'); }
+  } catch (e) { console.warn(e); return fallback(CONFIG.touchControl ? 'Распознавание руки не загрузилось — запускаю управление пальцем.'
+    : 'Распознавание руки не загрузилось. Проверь интернет и нажми ещё раз.'); }
   setStatus(''); begin('camera');
 };
 $('gc-btn-ptr').onclick = () => begin('pointer');
